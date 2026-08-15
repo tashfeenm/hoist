@@ -1,24 +1,26 @@
-
 # Generated fixture repo (rebuild with fixtures/make-fixture.sh)
 .fixture/
 
-# Latch state files
-.ai/review_feedback.json
-.ai/state.json
-.ai/CONTEXT.md
-.ai/MINDMAP.md
-.ai/WORKING.md
-.ai/_cache/
-.ai/transcripts/
-.ai/inbox-log.md
-
-# Latch review artifacts
+# ---------------------------------------------------------------------------
+# Local development tooling.
+#
+# hoist is a zero-dependency skill: git + bash, optionally gh and gitleaks.
+# Nothing below is needed to use it, read it, or contribute to it. It is the
+# maintainer's personal setup, kept out of the public tree on purpose — which
+# is the same convention hoist's README recommends to its own users.
+# ---------------------------------------------------------------------------
+.ai/
+.claude/
+.github/
+tasks/
+CLAUDE.md
+CLAUDE.local.md
+SETTINGS_GUIDE.md
+llms.txt
+requirements-latch.txt
 review_raw.json
 review_summary.md
 gates_report.json
-
-# Claude Code
-.claude/settings.local.json
 
 # Test/lint caches
 .pytest_cache/
@@ -26,7 +28,7 @@ gates_report.json
 .mypy_cache/
 __pycache__/
 
-# Secrets — never commit (latch CI uses GitHub Actions secrets, not .env)
+# Secrets — never commit
 .env
 .env.*
 !.env.example
