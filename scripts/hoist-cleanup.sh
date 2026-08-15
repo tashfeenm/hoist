@@ -62,11 +62,23 @@ trap 'die "cleanup aborted — operational error (line $LINENO)"' ERR
 REPO="$HOIST_REPO" WT="$HOIST_WORKTREE" TMP="$HOIST_TMP" B="$HOIST_BRANCH"
 
 registered=0
-git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WT" >/dev/null && registered=1
+git -C "$REPO" worktree list --porcelain >"$TMP/wt.list" 2>/dev/null || die "git worktree list failed — refusing to guess"
+grep -Fx -- "worktree $WT" "$TMP/wt.list" >/dev/null && registered=1
 present=0
 [ -d "$WT" ] && [ ! -L "$WT" ] && present=1
 
+# a worktree directory git no longer knows about cannot be audited for
+# unique work: refuse unless told to discard
+if [ "$present" -eq 1 ] && [ "$registered" -eq 0 ] && [ "$DISCARD" -eq 0 ]; then
+	warn "cleanup refused — the worktree directory exists but git no longer lists it, so its contents cannot be audited"
+	dim "  re-run with --discard to remove it (branch $B, worktree $WT)"
+	exit 1
+fi
+
 # --- would anything unique be lost? ----------------------------------------
+#
+# (ignored files — build outputs a gate left behind — are treated as
+# disposable; everything else in the worktree is audited)
 
 # Unique work = an unpushed commit, staged state that never shipped, or an
 # unstaged edit to a MANIFEST path. Non-manifest leftovers (build artifacts,
@@ -74,6 +86,11 @@ present=0
 # push they are listed and removed, before one they block like everything
 # else — the hoist itself has not shipped yet.
 if [ "$present" -eq 1 ] && [ "$registered" -eq 1 ] && [ "$DISCARD" -eq 0 ]; then
+	[ "$(manifest_digest "$HOIST_MANIFEST")" = "$HOIST_MANIFEST_DIGEST" ] || {
+		warn "cleanup refused — the manifest was modified since prepare, so unique work cannot be told apart"
+		dim "  re-run with --discard to remove the worktree anyway (branch $B, worktree $WT)"
+		exit 1
+	}
 	lost="" extra="" pushed=0
 	head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)"
 	if [ -n "$head_sha" ] && [ "$head_sha" != "$HOIST_BASE_SHA" ]; then
@@ -118,6 +135,14 @@ fi
 # --- remove ----------------------------------------------------------------
 
 problems=""
+wt_branch_ok=1
+if [ "$registered" -eq 1 ] && [ "$present" -eq 1 ]; then
+	[ "$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)" = "refs/heads/$B" ] || wt_branch_ok=0
+elif [ "$registered" -eq 0 ] && [ "$present" -eq 0 ]; then
+	# nothing left to prove the branch is ours; delete only if the state
+	# says so AND the branch exists — same as before, but say so
+	:
+fi
 if [ "$registered" -eq 1 ] && [ "$present" -eq 1 ]; then
 	git_h -C "$REPO" worktree remove --force -- "$WT" 2>"$TMP/wt-remove.err" ||
 		problems="$problems
@@ -132,9 +157,12 @@ elif [ "$present" -eq 1 ]; then
 fi
 
 if [ -z "$problems" ] && [ "$KEEP" -eq 0 ]; then
-	if git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1; then
+	# only the branch the worktree actually had checked out is ours to delete
+	if [ "$wt_branch_ok" -eq 0 ]; then
+		dim "branch $B kept — the worktree was not on it, so it is not provably hoist's"
+	elif git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1; then
 		# -D, not -d: the branch is usually unmerged by design at this point.
-		git -C "$REPO" branch -D -- "$B" >/dev/null 2>"$TMP/branch.err" ||
+		git_h -C "$REPO" branch -D -- "$B" >/dev/null 2>"$TMP/branch.err" ||
 			problems="$problems
   could not delete branch $B: $(tr '\n' ' ' <"$TMP/branch.err")"
 	else
@@ -155,11 +183,12 @@ rmdir -- "$REPO/.hoist" 2>/dev/null || true
 
 # --- verify -----------------------------------------------------------------
 
-! git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WT" >/dev/null ||
+wl="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)" || die "git worktree list failed after cleanup — check the repository"
+! printf '%s\n' "$wl" | grep -Fx -- "worktree $WT" >/dev/null ||
 	die "worktree still registered after cleanup: $WT"
 [ ! -e "$WT" ] || die "worktree directory still present: $WT"
 [ ! -e "$TMP" ] || die "state directory still present: $TMP"
-if [ "$KEEP" -eq 0 ]; then
+if [ "$KEEP" -eq 0 ] && [ "$wt_branch_ok" -eq 1 ]; then
 	! git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1 || die "branch still present: $B"
 fi
 

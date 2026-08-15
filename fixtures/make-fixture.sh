@@ -7,8 +7,8 @@
 #
 #   <dest>/origin.git      a bare remote whose main branch has moved on
 #   <dest>/workshop        a clone with a realistically dirty working tree
-#   <dest>/.hoist-fixture  sentinel: marks <dest> as something this script
-#                          made and may destroy on the next run
+#   <dest>/.hoist-fixture  sentinel (a versioned magic value): marks <dest>
+#                          as something this script made and may destroy
 #
 # `workshop` is what you point the skill at. Every planted case is listed in
 # the README's eval table, including the decoy that must NOT be flagged.
@@ -54,7 +54,8 @@ if [ -L "$DEST" ]; then
 	exit 2
 fi
 if [ -e "$DEST" ]; then
-	if [ ! -d "$DEST" ] || [ ! -f "$DEST/$SENTINEL_NAME" ]; then
+	if [ ! -d "$DEST" ] || [ -L "$DEST/$SENTINEL_NAME" ] || [ ! -f "$DEST/$SENTINEL_NAME" ] ||
+		[ "$(cat "$DEST/$SENTINEL_NAME" 2>/dev/null)" != "hoist-fixture-v1" ]; then
 		echo "make-fixture: $DEST exists and does not carry $SENTINEL_NAME — refusing to delete it." >&2
 		echo "  Pass a nonexistent path, or remove that directory yourself if it really is a stale fixture." >&2
 		exit 2
@@ -63,7 +64,7 @@ if [ -e "$DEST" ]; then
 	rm -rf -- "$DEST"
 fi
 mkdir -p -- "$DEST"
-: >"$DEST/$SENTINEL_NAME"
+printf 'hoist-fixture-v1\n' >"$DEST/$SENTINEL_NAME"
 
 ORIGIN="$DEST/origin.git"
 WORKSHOP="$DEST/workshop"

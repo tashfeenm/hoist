@@ -75,24 +75,39 @@ attest_verify "$A" "$TREE"
 
 R="$TMP/receipt"
 [ -f "$R" ] && [ ! -L "$R" ] || die "no dry-run receipt — run hoist finish first (and show the human the full diff)"
-[ "$(kv_get "$R" version || true)" = "1" ] || die "unsupported receipt version"
-[ "$(kv_get "$R" id || true)" = "$HOIST_ID" ] || die "receipt belongs to a different hoist"
-[ "$(kv_get "$R" tree || true)" = "$TREE" ] || die "receipt is for a different tree — re-run hoist finish"
-[ "$(kv_get "$R" attest || true)" = "$(digest_file "$A")" ] || die "receipt is for a different attestation — re-run hoist finish"
-[ -f "$TMP/message" ] && [ "$(kv_get "$R" message || true)" = "$(digest_file "$TMP/message")" ] ||
+kv_strict "$R" "receipt" "$RECEIPT_KEYS" ""
+ADIGEST="$(digest_file "$A")"
+[ "$(kv_get "$R" version)" = "1" ] || die "unsupported receipt version"
+[ "$(kv_get "$R" id)" = "$HOIST_ID" ] || die "receipt belongs to a different hoist"
+[ "$(kv_get "$R" tree)" = "$TREE" ] || die "receipt is for a different tree — re-run hoist finish"
+[ "$(kv_get "$R" attest)" = "$ADIGEST" ] || die "receipt is for a different attestation — re-run hoist finish"
+[ -f "$TMP/message" ] && [ ! -L "$TMP/message" ] && [ "$(kv_get "$R" message)" = "$(digest_file "$TMP/message")" ] ||
 	die "receipt does not match the message — re-run hoist finish"
 
 FD="$(kv_get "$A" findings_digest)"
 NF="$(kv_get "$A" findings)"
 open=""
 if [ "$NF" -gt 0 ]; then
-	ack_valid "$TMP/ack" "$TREE" "$FD" || die "$NF finding(s) unacknowledged — fix and re-scan, or hoist acknowledge each by ID"
+	ack_valid "$TMP/ack" "$TREE" "$FD" "$ADIGEST" || die "$NF finding(s) unacknowledged — fix and re-scan, or hoist acknowledge each by ID (then finish again)"
+	[ "$(kv_get "$R" ack)" = "$(digest_file "$TMP/ack")" ] ||
+		die "the acknowledgements changed after the dry run — re-run hoist finish so the trailers are shown"
 	while IFS= read -r id; do
 		[ -n "$id" ] || continue
 		kv_get "$TMP/ack" "ack.$id" >/dev/null 2>&1 || open="$open $id"
 	done < <(kv_get_all "$A" finding)
 	[ -z "$open" ] || die "unacknowledged finding(s):$open — fix and re-scan, or hoist acknowledge each by ID"
+else
+	[ "$(kv_get "$R" ack)" = "-" ] || die "receipt records acknowledgements for a clean attestation — re-run hoist finish"
 fi
+
+# --- the remote must be the one prepare bound ------------------------------
+
+cur_url="$(git -C "$HOIST_REPO" config --get "remote.$HOIST_REMOTE.url" 2>/dev/null || true)"
+[ "$cur_url" = "$HOIST_REMOTE_URL" ] || die "the URL of remote $HOIST_REMOTE changed since prepare — refusing (hoist cleanup --discard, then prepare again)"
+n_push="$(git -C "$HOIST_REPO" config --get-all "remote.$HOIST_REMOTE.pushurl" 2>/dev/null | grep -c . || true)"
+[ "${n_push:-0}" -le 1 ] || die "remote $HOIST_REMOTE now has several push URLs — refusing"
+cur_push="$(git -C "$HOIST_REPO" config --get "remote.$HOIST_REMOTE.pushurl" 2>/dev/null || true)"
+[ "$cur_push" = "$HOIST_PUSH_URL" ] || die "the push URL of remote $HOIST_REMOTE changed since prepare — refusing (hoist cleanup --discard, then prepare again)"
 
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HOIST_BASE_SHA" ] ||
 	die "the worktree's HEAD is not the base commit — run hoist cleanup --discard and prepare again"
@@ -122,18 +137,12 @@ case "$rc" in
 esac
 
 # --- commit ------------------------------------------------------------------
+#
+# The message file from finish is the whole commit message (trailers
+# included), committed verbatim and verified byte-for-byte below.
 
-MSG="$TMP/commitmsg"
-cp -- "$TMP/message" "$MSG"
-if [ "$NF" -gt 0 ]; then
-	printf '\n' >>"$MSG"
-	while IFS= read -r id; do
-		[ -n "$id" ] || continue
-		printf 'Hoist-Acknowledged: %s — %s\n' "$id" "$(kv_get "$TMP/ack" "ack.$id")" >>"$MSG"
-	done < <(kv_get_all "$A" finding)
-fi
-
-if ! git_h -C "$WT" commit -q -F "$MSG" 2>"$TMP/commit.err"; then
+MSG="$TMP/message"
+if ! git_h -C "$WT" commit -q --cleanup=verbatim -F "$MSG" 2>"$TMP/commit.err"; then
 	scrub_urls <"$TMP/commit.err" | sed 's/^/  /' >&2
 	die "commit failed (identity or signing not configured? hoist leaves signing as configured)"
 fi
@@ -147,17 +156,33 @@ verify_fail() {
 [ "$(git -C "$WT" rev-parse "$NEW^" 2>/dev/null || true)" = "$HOIST_BASE_SHA" ] || verify_fail "the new commit's parent is not the base"
 [ "$(git -C "$WT" rev-list --count "$HOIST_BASE_SHA..$NEW" 2>/dev/null || true)" = "1" ] || verify_fail "more than one commit on top of the base"
 [ "$(git -C "$WT" rev-parse "$NEW^{tree}" 2>/dev/null || true)" = "$TREE" ] || verify_fail "the committed tree is not the attested tree"
+git -C "$WT" cat-file commit "$NEW" 2>/dev/null | sed '1,/^$/d' >"$TMP/commit.msg" || verify_fail "could not read the new commit"
+cmp -s "$TMP/commit.msg" "$MSG" || verify_fail "the commit message is not the reviewed message"
+git -C "$WT" diff-tree --no-commit-id --no-renames --name-only -r -z "$NEW" >"$TMP/commit.paths" || verify_fail "could not list the committed paths"
 while IFS= read -r -d '' p; do
 	in_manifest "$HOIST_MANIFEST" "$p" || verify_fail "the commit touches a path outside the manifest: $p"
-done < <(git -C "$WT" diff-tree --no-commit-id --no-renames --name-only -r -z "$NEW")
+done <"$TMP/commit.paths"
 info "committed ${NEW:0:9}  ${C_DIM}tree ${TREE:0:9}${C_OFF}"
+
+# the target is re-read once more, as late as possible (signing may have
+# taken a while); the window between this and the push itself is documented
+rc=0
+git -C "$HOIST_REPO" ls-remote --exit-code -- "$HOIST_REMOTE" "refs/heads/$HOIST_TARGET" >"$TMP/ls-remote.out" 2>"$TMP/ls-remote.err" || rc=$?
+[ "$rc" -eq 0 ] && [ "$(cut -f1 <"$TMP/ls-remote.out")" = "$HOIST_BASE_SHA" ] ||
+	verify_fail "target moved while committing — hoist cleanup --discard, then prepare again"
 
 # --- push --------------------------------------------------------------------
 
-if ! git_h -C "$WT" push -q --force-with-lease="refs/heads/$B:" -- "$HOIST_REMOTE" "refs/heads/$B:refs/heads/$B" 2>"$TMP/push.err"; then
+# push the verified object, not the mutable branch ref
+if ! git_h -C "$WT" push -q --force-with-lease="refs/heads/$B:" -- "$HOIST_REMOTE" "$NEW:refs/heads/$B" 2>"$TMP/push.err"; then
 	scrub_urls <"$TMP/push.err" | sed 's/^/  /' >&2
 	undo
 	die "push failed — the local commit was undone so hoist push can be re-run once the cause is fixed"
+fi
+rc=0
+git -C "$HOIST_REPO" ls-remote --exit-code -- "$HOIST_REMOTE" "refs/heads/$B" >"$TMP/ls-remote.out" 2>/dev/null || rc=$?
+if [ "$rc" -ne 0 ] || [ "$(cut -f1 <"$TMP/ls-remote.out")" != "$NEW" ]; then
+	warn "pushed, but the remote does not report ${NEW:0:9} at refs/heads/$B — check the remote before opening a PR"
 fi
 printf '%s\n' "$NEW" >"$TMP/pushed"
 info "pushed    $B -> $HOIST_REMOTE"
@@ -172,6 +197,8 @@ hp="$(web_host_path "$remote_url")"
 host="${hp%% *}"
 path="${hp#* }"
 title="$(head -1 "$TMP/message")"
+eB="$(url_encode "$B")"
+eT="$(url_encode "$HOIST_TARGET")"
 
 if [ "$MAKE_PR" -eq 0 ]; then
 	info ""
@@ -179,6 +206,7 @@ if [ "$MAKE_PR" -eq 0 ]; then
 elif [ "$host" = "github.com" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
 	body_file="$TMP/prbody"
 	if [ "$(wc -l <"$TMP/message")" -gt 2 ]; then
+		# body + trailers, as reviewed
 		tail -n +3 "$TMP/message" >"$body_file"
 	else
 		printf 'Hoisted with hoist — https://github.com/tashfeen/hoist\n' >"$body_file"
@@ -186,16 +214,16 @@ elif [ "$host" = "github.com" ] && command -v gh >/dev/null 2>&1 && gh auth stat
 	if ! (cd "$WT" && gh pr create --repo "$path" --base "$HOIST_TARGET" --head "$B" \
 		--title "$title" --body-file "$body_file") >&2; then
 		warn "gh pr create failed after the push — the branch is up; open the PR here:"
-		info "  https://github.com/$path/compare/$HOIST_TARGET...$B?expand=1"
+		info "  https://github.com/$path/compare/$eT...$eB?expand=1"
 	fi
 elif [ "$host" = "github.com" ]; then
 	info ""
 	info "${C_BOLD}open the PR:${C_OFF}"
-	info "  https://github.com/$path/compare/$HOIST_TARGET...$B?expand=1"
+	info "  https://github.com/$path/compare/$eT...$eB?expand=1"
 elif [ "$host" = "gitlab.com" ]; then
 	info ""
 	info "${C_BOLD}open the merge request:${C_OFF}"
-	info "  https://gitlab.com/$path/-/merge_requests/new?merge_request[source_branch]=$B&merge_request[target_branch]=$HOIST_TARGET"
+	info "  https://gitlab.com/$path/-/merge_requests/new?merge_request[source_branch]=$eB&merge_request[target_branch]=$eT"
 else
 	info ""
 	info "branch $B is pushed to $HOIST_REMOTE — open the PR in your host's UI"

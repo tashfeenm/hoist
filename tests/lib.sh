@@ -29,28 +29,47 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export NO_COLOR=1
 unset GIT_DIR GIT_WORK_TREE GIT_LITERAL_PATHSPECS 2>/dev/null || true
 
-T_PASS=0 T_FAIL=0 T_NAME="${T_NAME:-$(basename "${0:-test}" .sh)}"
-T_TMPS=""
+T_PASS=0 T_FAIL=0 T_SKIP=0 T_NAME="${T_NAME:-$(basename "${0:-test}" .sh)}"
+# tmpdir is called as $(tmpdir), i.e. in a subshell, so the registry of
+# directories to remove lives in a file the subshell can append to.
+T_TMPS_FILE="$(mktemp "${TMPDIR:-/tmp}/hoist-test-registry.XXXXXX")" || {
+	echo "mktemp failed" >&2
+	exit 2
+}
 
 _t_cleanup() {
 	local d
-	for d in $T_TMPS; do
-		[ -d "$d" ] && chmod -R u+w "$d" 2>/dev/null && rm -rf "$d"
-	done
+	while IFS= read -r d; do
+		[ -n "$d" ] && [ -d "$d" ] && chmod -R u+w "$d" 2>/dev/null && rm -rf "$d"
+	done <"$T_TMPS_FILE"
+	rm -f "$T_TMPS_FILE"
 	return 0
 }
 trap _t_cleanup EXIT
 
-# tmpdir — a fresh temp directory, removed at exit.
+# tmpdir — a fresh temp directory, removed at exit. On failure the whole
+# test is killed (a subshell exit would only end the substitution).
 tmpdir() {
 	local d
 	d="$(mktemp -d "${TMPDIR:-/tmp}/hoist-test.XXXXXX")" || {
-		echo "mktemp failed" >&2
+		echo "mktemp failed — aborting $T_NAME" >&2
+		kill -TERM "$$"
 		exit 2
 	}
 	d="$(cd "$d" && pwd -P)"
-	T_TMPS="$T_TMPS $d"
+	printf '%s\n' "$d" >>"$T_TMPS_FILE"
 	printf '%s\n' "$d"
+}
+
+# skip <reason> — record a skipped case; HOIST_TEST_STRICT=1 turns skips
+# into failures (for a CI job that declares its prerequisites).
+skip() {
+	if [ "${HOIST_TEST_STRICT:-0}" = 1 ]; then
+		_fail "SKIPPED (strict): $1"
+	else
+		T_SKIP=$((T_SKIP + 1))
+		printf '# SKIP %s\n' "$1"
+	fi
 }
 
 # fixture_new — build a fresh fixture; sets FIX, WORKSHOP, ORIGIN.
@@ -181,9 +200,9 @@ snapshot_same() {
 # origin_branch_exists <origin.git> <branch>
 origin_branch_exists() { git -C "$1" rev-parse --verify -q "refs/heads/$2" >/dev/null 2>&1; }
 
-# done_testing — print the summary line; exit 1 if anything failed.
+# done_testing — print the plan and summary; exit 1 if anything failed.
 done_testing() {
 	printf '1..%d\n' $((T_PASS + T_FAIL))
-	printf '# %s: %d passed, %d failed\n' "$T_NAME" "$T_PASS" "$T_FAIL"
-	[ "$T_FAIL" -eq 0 ]
+	printf '# %s: %d passed, %d failed, %d skipped\n' "$T_NAME" "$T_PASS" "$T_FAIL" "$T_SKIP"
+	[ "$T_FAIL" -eq 0 ] && [ "$T_PASS" -gt 0 ]
 }

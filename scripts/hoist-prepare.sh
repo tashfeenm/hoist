@@ -94,6 +94,14 @@ git -C "$REPO" rev-parse --verify -q HEAD >/dev/null 2>&1 || die "repo has no co
 	die "this is a shallow clone — the drift check needs history. Run: git fetch --unshallow"
 
 git -C "$REPO" remote get-url -- "$REMOTE" >/dev/null 2>&1 || die "no such remote: $REMOTE"
+# The remote's endpoints are bound now and re-verified at push: a pushurl
+# added later (by a gate, or anyone) would send the branch somewhere else.
+REMOTE_URL="$(git -C "$REPO" config --get "remote.$REMOTE.url" 2>/dev/null || true)"
+[ -n "$REMOTE_URL" ] || die "remote $REMOTE has no URL configured"
+n_push="$(git -C "$REPO" config --get-all "remote.$REMOTE.pushurl" 2>/dev/null | grep -c . || true)"
+[ "${n_push:-0}" -le 1 ] || die "remote $REMOTE has several push URLs — hoist refuses to push to more than one destination"
+PUSH_URL="$(git -C "$REPO" config --get "remote.$REMOTE.pushurl" 2>/dev/null || true)"
+! has_control "$REMOTE_URL$PUSH_URL" || die "remote URL contains control characters"
 git check-ref-format --branch "$TARGET" >/dev/null 2>&1 || die "not a valid branch name: $TARGET"
 ! has_control "$TARGET$REMOTE" || die "target/remote contain control characters"
 
@@ -126,7 +134,7 @@ done
 
 if [ "$FETCH" -eq 1 ]; then
 	dim "fetching $REMOTE/$TARGET ..."
-	fetch_err="$(git -C "$REPO" fetch -q "$REMOTE" "$TARGET" 2>&1 >/dev/null | scrub_urls)" ||
+	fetch_err="$(git_h -C "$REPO" fetch -q "$REMOTE" "$TARGET" 2>&1 >/dev/null | scrub_urls)" ||
 		die "could not fetch $REMOTE/$TARGET: ${fetch_err:-no details from git}. Fix the connection, or pass --no-fetch to hoist against the local copy (drift will then be reported as stale)."
 fi
 
@@ -137,7 +145,13 @@ BASE_SHA="$(git -C "$REPO" rev-parse "$BASE_REF")"
 
 # The merge-base is what upstream-drift detection compares against: work that
 # landed on the target after this point is work our file states predate.
-MERGE_BASE="$(git -C "$REPO" merge-base HEAD "$BASE_REF" 2>/dev/null || true)"
+mb_rc=0
+MERGE_BASE="$(git -C "$REPO" merge-base HEAD "$BASE_REF" 2>/dev/null)" || mb_rc=$?
+case "$mb_rc" in
+0) ;;
+1) MERGE_BASE="" ;;
+*) die "git merge-base failed (exit $mb_rc) — repository problem, not unrelated history" ;;
+esac
 UNRELATED=0
 if [ -z "$MERGE_BASE" ]; then
 	[ "$UNRELATED_OK" -eq 1 ] ||
@@ -170,8 +184,16 @@ rollback() {
 		return 0
 	}
 	if [ "$CREATED_WT" -eq 1 ]; then
+		# worktree add may have failed half-way (branch made, checkout not):
+		# inspect what actually exists rather than trusting its status
 		git_h -C "$REPO" worktree remove --force -- "$WORKTREE" >/dev/null 2>&1 || true
-		git -C "$REPO" branch -D -- "$BRANCH" >/dev/null 2>&1 || true
+		if git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WORKTREE" >/dev/null; then
+			rm -r -- "$WORKTREE" 2>/dev/null || true
+			git_h -C "$REPO" worktree prune >/dev/null 2>&1 || true
+		fi
+		if git -C "$REPO" rev-parse --verify -q "refs/heads/$BRANCH" >/dev/null 2>&1; then
+			git_h -C "$REPO" branch -D -- "$BRANCH" >/dev/null 2>&1 || true
+		fi
 	fi
 	if [ "$CREATED_TMP" -eq 1 ] && [ -d "$TMP" ] && [ -f "$TMP/.hoist-state" ]; then
 		rm -r -- "$TMP"
@@ -231,9 +253,9 @@ CREATED_TMP=1
 	: >"$TMP/.hoist-state"
 )
 
+CREATED_WT=1 # before, not after: a half-made worktree must still be rolled back
 git_h -C "$REPO" -c core.sparseCheckout=false worktree add -q -b "$BRANCH" -- "$WORKTREE" "$BASE_REF" ||
 	die "could not create the worktree"
-CREATED_WT=1
 [ -z "$(git -C "$WORKTREE" ls-files -v 2>/dev/null | grep -E '^[Ss] ' | head -1)" ] ||
 	die "the temporary worktree came out sparse — hoist needs a full checkout"
 
@@ -266,6 +288,7 @@ for path in "${PATHS[@]}"; do
 	printf '%s\n' "$path" >>"$MANIFEST"
 done
 
+HOIST_TMP="$TMP" # restage keeps its scratch list under the state dir
 restage "$WORKTREE" "$MANIFEST"
 
 # --- record and report -----------------------------------------------------
@@ -276,9 +299,12 @@ HOIST_REPO="$REPO"
 HOIST_WORKTREE="$WORKTREE"
 HOIST_TMP="$TMP"
 HOIST_MANIFEST="$MANIFEST"
+HOIST_MANIFEST_DIGEST="$(manifest_digest "$MANIFEST")"
 HOIST_BRANCH="$BRANCH"
 HOIST_TARGET="$TARGET"
 HOIST_REMOTE="$REMOTE"
+HOIST_REMOTE_URL="$REMOTE_URL"
+HOIST_PUSH_URL="$PUSH_URL"
 HOIST_BASE_SHA="$BASE_SHA"
 HOIST_MERGE_BASE="$MERGE_BASE"
 HOIST_FETCHED="$FETCH"

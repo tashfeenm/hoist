@@ -148,7 +148,7 @@ info ""
 # per-check status: clean | findings | not-run | skipped   (errors die → 2)
 ST_GATES="not-run" ST_SECRETS="not-run" ST_PERSONAL="not-run" ST_DRIFT="not-run"
 ENG_GATES="none" ENG_SECRETS="none" ENG_PERSONAL="patterns" ENG_DRIFT="merge-base"
-GATES_DIGEST="-"
+GATES_DIGEST="-" GATES_TEXT="-"
 MUTATED=0
 
 # ---------------------------------------------------------------------------
@@ -180,6 +180,9 @@ detect_gates() {
 }
 
 refs_snapshot() { git -C "$WT" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null; }
+# the repository's own configuration (shared with the workshop) — a gate that
+# adds a pushurl or flips a filter is a mutation hoist must not attest across
+config_snapshot() { git -C "$WT" config --list --show-origin 2>/dev/null | grep -v '^command line:' | sort; }
 
 scan_gates() {
 	section "gates"
@@ -209,18 +212,29 @@ scan_gates() {
 	fi
 	ENG_GATES="bash"
 	GATES_DIGEST="$(digest_str "$cmd")"
+	GATES_TEXT="$(printf '%s' "$cmd" | redact_secrets | sanitize_line "$(cat)" 200)"
 	dim "  \$ $cmd"
 
-	local t0 t1 refs0 refs1 log="$TMP/gates.log" rc=0 changed
+	local t0 t1 refs0 refs1 cfg0 cfg1 log="$TMP/gates.log" rc=0 changed
 	t0="$(staged_tree "$WT")"
 	refs0="$(refs_snapshot)"
+	cfg0="$(config_snapshot)"
 	(cd "$WT" && exec bash -e -o pipefail -c "$cmd") </dev/null >"$log" 2>&1 || rc=$?
+
+	# Nothing a gate wrote into the state directory is trusted: the manifest is
+	# frozen (state_load re-checks its digest), and the findings buffer starts
+	# over here.
+	: >"$FINDINGS_FILE"
+	NFIND=0
+	[ "$(manifest_digest "$HOIST_MANIFEST")" = "$HOIST_MANIFEST_DIGEST" ] ||
+		die "the gates modified the manifest — refusing (run hoist cleanup --discard and prepare again)"
 
 	# Whatever the gates did to the index is dropped; whatever they did to the
 	# hoisted files on disk is what we now stage — and compare.
 	restage "$WT" "$HOIST_MANIFEST"
 	t1="$(staged_tree "$WT")"
 	refs1="$(refs_snapshot)"
+	cfg1="$(config_snapshot)"
 	refresh_lists
 
 	if [ "$rc" -eq 0 ]; then
@@ -228,9 +242,13 @@ scan_gates() {
 		ST_GATES="clean"
 	else
 		finding gates "gates" "exit" "exit $rc — the hoisted state does not stand on its own"
-		sed 's/^/      /' "$log" | tail -25 >&2
+		tail -25 "$log" | redact_secrets | sed 's/^/      /' >&2
 		dim "      full output: $log"
 		ST_GATES="findings"
+	fi
+	if [ "$cfg0" != "$cfg1" ]; then
+		finding gates "gates" "config" "the gates changed git configuration — no attestation; run hoist cleanup --discard and prepare again"
+		MUTATED=1
 	fi
 	if [ "$refs0" != "$refs1" ] || [ "$(git -C "$WT" rev-parse HEAD)" != "$HOIST_BASE_SHA" ]; then
 		finding gates "gates" "refs" "the gates changed HEAD or refs in the repository — no attestation; run hoist cleanup --discard and prepare again"
@@ -242,7 +260,7 @@ scan_gates() {
 		MUTATED=1
 	fi
 	local extra
-	extra="$(git -C "$WT" status --porcelain --no-renames --untracked=all -z 2>/dev/null | tr '\0' '\n' | awk 'NF' | while IFS= read -r l; do
+	extra="$(git_h -C "$WT" status --porcelain --no-renames --untracked=all -z 2>/dev/null | tr '\0' '\n' | awk 'NF' | while IFS= read -r l; do
 		p="${l#???}"
 		in_manifest "$HOIST_MANIFEST" "$p" || printf 'x\n'
 	done | wc -l | tr -d ' ')"
@@ -343,15 +361,13 @@ scan_secrets() {
 			line="${hit#*:}"
 			tok="${line#*:}"
 			line="${line%%:*}"
-			# AWS documentation values (the secret keys are here for
-			# completeness — the pattern set does not match them anyway)
+			# exact AWS documentation values only — no substring rule, a
+			# real token may legally contain EXAMPLE
 			case "$tok" in
 			AKIAIOSFODNN7EXAMPLE | AKIAI44QH8DHBEXAMPLE) continue ;;
-			wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY | je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY) continue ;;
-			*EXAMPLE*) continue ;;
 			esac
 			finding secrets "$file:$line" "$name" "$name ${C_DIM}(hoist pattern)${C_OFF}"
-		done < <(cd "$scanroot" && grep -rnoE -- "${rx#*:}" . 2>/dev/null || true)
+		done < <(cd "$scanroot" && grep -arnoE -- "${rx#*:}" . 2>/dev/null || true)
 	done
 
 	[ "$NFIND" -gt "$before" ] && ST_SECRETS="findings"
@@ -374,7 +390,7 @@ scan_personal() {
 	# content line, not a header).
 	while IFS= read -r p; do
 		[ -n "$p" ] || continue
-		GIT_LITERAL_PATHSPECS=1 git -C "$WT" diff --cached -U0 --no-color --no-ext-diff HEAD -- "$p" |
+		GIT_LITERAL_PATHSPECS=1 git -C "$WT" diff --cached -U0 --no-color --no-ext-diff --no-textconv HEAD -- "$p" |
 			awk -v p="$p" -v locs="$locs" -v txt="$txt" '
 				/^@@/ { s=$3; sub(/^\+/,"",s); split(s,a,","); l=a[1]+0; inh=1; next }
 				inh && /^\+/ { print p ":" l >> locs; print substr($0,2) >> txt; l++; next }
@@ -392,7 +408,7 @@ scan_personal() {
 			n="${hit%%:*}"
 			content="${hit#*:}"
 			finding personal "$(sed -n "${n}p" "$locs")" "personal" \
-				"looks personal: ${C_DIM}$(sanitize_line "$content" 60)${C_OFF}"
+				"looks personal: ${C_DIM}$(printf '%s' "$content" | redact_secrets | sanitize_line "$(cat)" 60)${C_OFF}"
 		done < <(grep -n "$@" "$txt" 2>/dev/null || true)
 	}
 	# generic path shapes: regex
@@ -419,10 +435,12 @@ scan_personal() {
 # 4. Upstream drift
 # ---------------------------------------------------------------------------
 
-# tree_entry <rev> <path> — "mode sha" of a path in a commit's tree, or "".
+# tree_entry <rev> <path> — "mode type sha" of a path in a commit's tree, or "".
 tree_entry() {
-	GIT_LITERAL_PATHSPECS=1 git -C "$HOIST_REPO" ls-tree -z "$1" -- "$2" 2>/dev/null |
-		tr '\0' '\n' | awk -F'\t' -v p="$2" '$2==p {split($1,m," "); print m[1] " " m[3]; exit}'
+	local out rc=0
+	out="$(GIT_LITERAL_PATHSPECS=1 git -C "$HOIST_REPO" ls-tree -z "$1" -- "$2" 2>/dev/null)" || rc=$?
+	[ "$rc" -eq 0 ] || die "git ls-tree failed for $2 at ${1:0:9}"
+	printf '%s' "$out" | tr '\0' '\n' | awk -F'\t' -v p="$2" '$2==p {split($1,m," "); print m[1] " " m[2] " " m[3]; exit}'
 }
 # index_entry <path> — "mode sha" from the worktree index, or "".
 index_entry() {
@@ -460,7 +478,7 @@ incorporated() {
 
 scan_drift() {
 	section "upstream drift"
-	local before="$NFIND" p n drifted=0 mb tg ix mb_mode tg_mode ix_mode kind rule
+	local before="$NFIND" p n drifted=0 mb tg ix mb_mode tg_mode ix_mode mb_type tg_type kind rule
 	if [ "$HOIST_UNRELATED" = "1" ]; then
 		finding drift "drift" "unrelated" "no shared history with $HOIST_REMOTE/$HOIST_TARGET (prepared with --allow-unrelated-history) — the drift check cannot run; the final diff is the only authority"
 		ST_DRIFT="findings"
@@ -480,10 +498,14 @@ scan_drift() {
 		mb_mode="${mb%% *}"
 		tg_mode="${tg%% *}"
 		ix_mode="${ix%% *}"
+		mb_type="$(printf '%s' "$mb" | cut -d' ' -f2)"
+		tg_type="$(printf '%s' "$tg" | cut -d' ' -f2)"
 		n="$(git -C "$HOIST_REPO" rev-list --count "$HOIST_MERGE_BASE..$HOIST_BASE_SHA" -- "$p" 2>/dev/null || echo '?')"
 
 		kind="" rule=""
-		if [ -z "$tg" ]; then
+		if [ -n "$mb$tg" ] && { [ "$mb_type" = tree ] || [ "$tg_type" = tree ] || [ "$mb_type" = commit ] || [ "$tg_type" = commit ]; }; then
+			rule="type" kind="directory/submodule involved upstream (${mb_type:-absent}→${tg_type:-absent}) — manual review"
+		elif [ -z "$tg" ]; then
 			rule="deleted" kind="deleted upstream — your copy re-adds it (a rename upstream shows as delete+add); manual review"
 		elif [ -z "$mb" ]; then
 			rule="add-add" kind="also added upstream (add/add) — merge by hand; manual review"
@@ -493,10 +515,10 @@ scan_drift() {
 			rule="type" kind="file/symlink type involved (upstream ${mb_mode}→${tg_mode}, yours $ix_mode) — manual review"
 		elif [ "$mb_mode" != "$tg_mode" ] && [ "$ix_mode" != "$tg_mode" ]; then
 			rule="mode" kind="mode changed upstream (${mb_mode}→${tg_mode}) but your copy is $ix_mode — chmod the copy in the worktree"
-			[ "${mb#* }" = "${tg#* }" ] || kind="$kind (content changed upstream too)"
-		elif git -C "$HOIST_REPO" diff --numstat "$HOIST_MERGE_BASE" "$HOIST_BASE_SHA" -- "$p" 2>/dev/null | grep "$(printf '^-\t-\t')" >/dev/null; then
+			[ "${mb##* }" = "${tg##* }" ] || kind="$kind (content changed upstream too)"
+		elif git -C "$HOIST_REPO" diff --numstat --no-textconv --no-ext-diff "$HOIST_MERGE_BASE" "$HOIST_BASE_SHA" -- "$p" 2>/dev/null | grep "$(printf '^-\t-\t')" >/dev/null; then
 			rule="binary" kind="binary — changed upstream ($n commit(s)); resolve by hand"
-		elif [ "${mb#* }" = "${tg#* }" ]; then
+		elif [ "${mb##* }" = "${tg##* }" ]; then
 			# mode-only upstream change and our mode already matches → nothing to carry
 			dim "  $p — upstream changed only the mode, and your copy matches"
 			continue
@@ -568,6 +590,7 @@ if [ "$ran" -eq 4 ] && [ "$MUTATED" -eq 0 ]; then
 	kv_set "$tmpf" check.personal "$ENG_PERSONAL:$ST_PERSONAL"
 	kv_set "$tmpf" check.drift "$ENG_DRIFT:$ST_DRIFT"
 	kv_set "$tmpf" gates_cmd "$GATES_DIGEST"
+	kv_set "$tmpf" gates_cmd_text "$GATES_TEXT"
 	kv_set "$tmpf" findings "$NFIND"
 	while IFS= read -r id; do
 		[ -n "$id" ] && kv_set "$tmpf" finding "$id"

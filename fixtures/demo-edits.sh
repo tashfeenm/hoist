@@ -45,17 +45,21 @@ done
 [ -n "$STATE" ] || die "usage: demo-edits.sh --state FILE"
 
 state_load "$STATE"
+lock_state
+trap 'unlock_state' EXIT
 WT="$HOIST_WORKTREE"
 
-# Only the fixture: sentinel beside the workshop, and the known root commit.
-[ -f "$(dirname -- "$HOIST_REPO")/.hoist-fixture" ] ||
-	die "this state does not point at a make-fixture.sh fixture (no .hoist-fixture sentinel beside the repo) — refusing"
+# Only the fixture: the versioned sentinel beside the workshop, and the known
+# root commit.
+sentinel="$(dirname -- "$HOIST_REPO")/.hoist-fixture"
+[ -f "$sentinel" ] && [ ! -L "$sentinel" ] && [ "$(cat "$sentinel")" = "hoist-fixture-v1" ] ||
+	die "this state does not point at a make-fixture.sh fixture (no versioned .hoist-fixture sentinel beside the repo) — refusing"
 root_subject="$(git -C "$HOIST_REPO" log --max-parents=0 --format=%s HEAD 2>/dev/null | tail -1)"
 [ "$root_subject" = "initial widget" ] ||
 	die "this repo's root commit is '$root_subject', not the fixture's — refusing"
 
 tmp="$(mktemp "$HOIST_TMP/demo-edit.XXXXXX")"
-trap 'rm -f -- "$tmp"' EXIT
+trap 'rm -f -- "$tmp"; unlock_state' EXIT
 
 # put <path> — replace a regular file in the worktree with stdin, keeping its
 # mode; refuse anything that is not a plain file.

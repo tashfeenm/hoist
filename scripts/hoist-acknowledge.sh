@@ -3,7 +3,12 @@
 # hoist acknowledge — accept specific findings, by ID, with a reason.
 #
 # Usage:
-#   hoist acknowledge --state FILE --finding ID [--finding ID...] --reason "..."
+#   hoist acknowledge --state FILE --finding ID [--finding ID...] --reason "..." [--allow-secret]
+#
+#   --allow-secret   required to acknowledge a secrets-* finding. Refused by
+#                    default: a live credential is removed, not acknowledged;
+#                    this flag is for a documented example value in a test
+#                    fixture and gets recorded in the trailer.
 #
 # Only findings listed in the CURRENT attestation can be acknowledged (IDs are
 # printed by scan and finish); the acknowledgement is bound to the attested
@@ -14,6 +19,8 @@
 # The reason is one line (≤200 chars), sanitized, and refused if it carries a
 # credential-shaped token or a personal identifier. Acknowledged IDs and
 # reasons are recorded in the commit as Hoist-Acknowledged: trailers.
+# Acknowledging voids any dry-run receipt: run hoist finish again so the
+# trailers are part of the message the human sees.
 #
 # Exit 0 ok, 2 error.
 #
@@ -28,7 +35,7 @@ usage() {
 	exit "${1:-0}"
 }
 
-STATE="" REASON="" IDS=""
+STATE="" REASON="" IDS="" ALLOW_SECRET=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--state)
@@ -46,6 +53,10 @@ while [ $# -gt 0 ]; do
 	--reason)
 		REASON="${2:?--reason needs text}"
 		shift 2
+		;;
+	--allow-secret)
+		ALLOW_SECRET=1
+		shift
 		;;
 	-h | --help) usage 0 ;;
 	*) die "unknown argument: $1" ;;
@@ -78,19 +89,29 @@ fi
 
 known="$(kv_get_all "$A" finding)"
 for id in $IDS; do
-	printf '%s\n' "$known" | grep -qFx -- "$id" ||
+	printf '%s\n' "$known" | grep -Fx -- "$id" >/dev/null ||
 		die "unknown finding ID for the current attestation: $id (current: $(printf '%s' "$known" | tr '\n' ' '))"
+	case "$id" in
+	secrets-*)
+		[ "$ALLOW_SECRET" -eq 1 ] ||
+			die "$id is a secrets finding — remove the credential from the copy in the worktree and re-scan. If it is a documented example value in a test fixture, pass --allow-secret (recorded)."
+		;;
+	esac
 done
+[ "$ALLOW_SECRET" -eq 0 ] || reason="$reason [allow-secret]"
 
 # Keep earlier acknowledgements only if they are bound to this same tree and
 # findings set; otherwise start over.
+ADIGEST="$(digest_file "$A")"
 NEW="$TMP/ack.tmp"
 : >"$NEW"
 kv_set "$NEW" version 1
 kv_set "$NEW" id "$HOIST_ID"
+kv_set "$NEW" base "$HOIST_BASE_SHA"
 kv_set "$NEW" tree "$TREE"
+kv_set "$NEW" attest "$ADIGEST"
 kv_set "$NEW" findings "$FD"
-if ack_valid "$TMP/ack" "$TREE" "$FD"; then
+if ack_valid "$TMP/ack" "$TREE" "$FD" "$ADIGEST"; then
 	while IFS= read -r line || [ -n "$line" ]; do
 		case "$line" in
 		ack.*=*)
@@ -105,6 +126,9 @@ fi
 for id in $IDS; do
 	kv_set "$NEW" "ack.$id" "$reason"
 done
+# a new acknowledgement set voids the dry-run receipt: the human must see the
+# trailers as part of the message before push
+rm -f -- "$TMP/receipt"
 mv -f -- "$NEW" "$TMP/ack"
 
 n=0
@@ -123,6 +147,6 @@ info "acknowledged: $(printf '%s' "$IDS" | sed 's/^ //')  ${C_DIM}— $reason${C
 if [ -n "$remaining" ]; then
 	info "$n acknowledged, still open:$remaining"
 else
-	info "$n acknowledged, none open — run hoist finish, then (in a later turn, on the human's yes) hoist push"
+	info "$n acknowledged, none open — run hoist finish again (the receipt was voided), then, in a later turn on the human's yes, hoist push"
 fi
 exit 0

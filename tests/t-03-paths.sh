@@ -78,7 +78,7 @@ if [ -f "$WORKSHOP/vendor/mod/m.txt" ]; then
 	rm -rf "$WORKSHOP/.git/modules" "$WORKSHOP/vendor" "$WORKSHOP/.gitmodules"
 	git -C "$WORKSHOP" reset -q >/dev/null 2>&1 || true
 else
-	printf '# skipped submodule cases (submodule add unavailable)\n'
+	skip "submodule cases (submodule add unavailable)"
 fi
 
 # --- a hoisted file that becomes a directory in the worktree ----------------

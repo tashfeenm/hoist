@@ -14,10 +14,14 @@
 # staged tree; refuses otherwise ("re-run hoist scan"). Shows the full staged
 # diff (stat, mode/type summary, patch), the attestation summary with finding
 # IDs and their acknowledgement status, and the exact next command. Title and
-# body are sanitized and run through the secret/personal safeguards.
+# body are sanitized and run through a high-signal credential/personal guard
+# (not a full secret scanner).
 #
-# Writes <state dir>/message and <state dir>/receipt (bound to tree,
-# attestation digest and message digest). Exit 0 ok, 2 error.
+# Writes <state dir>/message — the FINAL commit message, trailers for the
+# current acknowledgements included — and <state dir>/receipt (bound to
+# tree, attestation digest, message digest and acknowledgement digest).
+# Acknowledging or re-scanning after this voids the receipt: run finish
+# again. Exit 0 ok, 2 error.
 #
 set -Eeuo pipefail
 
@@ -77,18 +81,47 @@ fi
 
 title="$(sanitize_line "$TITLE" 200)"
 [ -n "$title" ] || die "--title is empty after sanitizing"
+# body: strip ANSI and control bytes (CR included; LF and TAB kept), bound
+# to 4000 bytes — done through files, not a pipeline, so a long body
+# truncates instead of SIGPIPEing an upstream stage under pipefail
 esc="$(printf '\033')"
-body="$(printf '%s\n' "$BODY" | sed -e "s/$esc\\[[0-9;]*[A-Za-z]//g" | tr -d '\000-\010\013\014\016-\037\177' | head -c 4000)"
+printf '%s\n' "$BODY" >"$TMP/body.raw"
+sed -e "s/$esc\\[[0-9;]*[A-Za-z]//g" "$TMP/body.raw" >"$TMP/body.1" || die "could not sanitize the body"
+tr -d '\000-\010\013-\037\177' <"$TMP/body.1" >"$TMP/body.2" || die "could not sanitize the body"
+head -c 4000 "$TMP/body.2" >"$TMP/body.3" || die "could not sanitize the body"
+body="$(cat "$TMP/body.3")"
+rm -f -- "$TMP/body.raw" "$TMP/body.1" "$TMP/body.2" "$TMP/body.3"
 if why="$(text_looks_sensitive "$title" 2>&1)"; then
 	die "the title contains $why — hoist will not put that in a commit"
 fi
 if [ -n "$body" ] && why="$(text_looks_sensitive "$body" 2>&1)"; then
 	die "the body contains $why — hoist will not put that in a commit"
 fi
+
+# The message file IS the final commit message: title, body, and one
+# Hoist-Acknowledged trailer per acknowledged finding as of now. push
+# commits it verbatim and verifies the bytes.
+A="$TMP/attest"
+ADIGEST="$(digest_file "$A")"
+NF="$(kv_get "$A" findings)"
+FD="$(kv_get "$A" findings_digest)"
+ACK_OK=0
+if [ "$NF" -gt 0 ] && ack_valid "$TMP/ack" "$TREE" "$FD" "$ADIGEST"; then ACK_OK=1; fi
 {
 	printf '%s\n' "$title"
 	if [ -n "$body" ]; then
 		printf '\n%s\n' "$body"
+	fi
+	if [ "$ACK_OK" -eq 1 ]; then
+		first=1
+		while IFS= read -r id; do
+			[ -n "$id" ] || continue
+			reason="$(kv_get "$TMP/ack" "ack.$id" 2>/dev/null || true)"
+			[ -n "$reason" ] || continue
+			[ "$first" -eq 0 ] || printf '\n'
+			first=0
+			printf 'Hoist-Acknowledged: %s — %s\n' "$id" "$reason"
+		done < <(kv_get_all "$A" finding)
 	fi
 } >"$TMP/message.tmp"
 mv -f -- "$TMP/message.tmp" "$TMP/message"
@@ -103,22 +136,21 @@ info "  branch  $HOIST_BRANCH"
 info "  onto    $HOIST_REMOTE/$HOIST_TARGET @ ${HOIST_BASE_SHA:0:9}"
 info "  tree    ${TREE:0:9}"
 info ""
-git -C "$WT" diff --cached --no-renames --stat --summary HEAD >&2 || die "could not diff"
+git -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv --stat --summary HEAD >&2 || die "could not diff"
 info ""
-info "${C_BOLD}full diff — this is exactly what would land${C_OFF}"
-git -C "$WT" diff --cached --no-renames --no-ext-diff HEAD >&2 || die "could not diff"
+info "${C_BOLD}full diff — this is exactly what would land${C_OFF}  ${C_DIM}(raw blobs: no textconv, no external diff)${C_OFF}"
+git -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv HEAD >&2 || die "could not diff"
 info ""
 
 # --- attestation summary --------------------------------------------------
 
-A="$TMP/attest"
 info "${C_BOLD}scan${C_OFF}  (attestation for tree ${TREE:0:9})"
 for c in gates secrets personal drift; do
 	v="$(kv_get "$A" "check.$c")"
 	printf '  %-9s %s\n' "$c" "$v" >&2
 done
-NF="$(kv_get "$A" findings)"
-FD="$(kv_get "$A" findings_digest)"
+gt="$(kv_get "$A" gates_cmd_text)"
+[ "$gt" = "-" ] || dim "  gates command: $gt"
 unacked=""
 if [ "$NF" -gt 0 ]; then
 	info ""
@@ -127,7 +159,7 @@ if [ "$NF" -gt 0 ]; then
 		[ -n "$id" ] || continue
 		txt="$(awk -F'\t' -v i="$id" '$1==i {print $3 "  " $4; exit}' "$TMP/findings.txt" 2>/dev/null || true)"
 		reason="$(kv_get "$TMP/ack" "ack.$id" 2>/dev/null || true)"
-		if [ -n "$reason" ] && ack_valid "$TMP/ack" "$TREE" "$FD"; then
+		if [ -n "$reason" ] && [ "$ACK_OK" -eq 1 ]; then
 			printf '    %s%-20s%s %s  %sacknowledged: %s%s\n' "$C_DIM" "$id" "$C_OFF" "$txt" "$C_GRN" "$reason" "$C_OFF" >&2
 		else
 			printf '    %s%-20s%s %s  %sunacknowledged%s\n' "$C_YEL" "$id" "$C_OFF" "$txt" "$C_YEL" "$C_OFF" >&2
@@ -144,14 +176,16 @@ R="$TMP/receipt.tmp"
 kv_set "$R" version 1
 kv_set "$R" id "$HOIST_ID"
 kv_set "$R" tree "$TREE"
-kv_set "$R" attest "$(digest_file "$A")"
+kv_set "$R" attest "$ADIGEST"
 kv_set "$R" message "$(digest_file "$TMP/message")"
+if [ "$ACK_OK" -eq 1 ]; then kv_set "$R" ack "$(digest_file "$TMP/ack")"; else kv_set "$R" ack "-"; fi
 mv -f -- "$R" "$TMP/receipt"
 
 info "${C_BOLD}dry run — nothing has been committed or pushed.${C_OFF} Receipt written for tree ${TREE:0:9}."
 if [ -n "$unacked" ]; then
 	dim "  unacknowledged findings block the push. Fix them in the worktree and re-run"
-	dim "  hoist scan, or acknowledge each by ID with a real reason:"
+	dim "  hoist scan, or acknowledge each by ID with a real reason (then run finish again;"
+	dim "  acknowledging voids this receipt):"
 	dim "    $(printf 'hoist acknowledge --state %q --finding ID --reason "..."' "$STATE")"
 else
 	dim "  to ship, in a later turn, once the human has said yes to THIS tree:"

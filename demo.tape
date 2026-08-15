@@ -6,9 +6,11 @@
 #   vhs demo.tape        # from the repo root; writes demo.gif
 #
 # Hidden setup clones the COMMITTED tree to a temp path (nothing private, no
-# maintainer path on screen), builds the fixture there and runs a test suite
-# first — a failing suite kills the shell, so a GIF only comes out of a green
-# tree. Hidden teardown cleans the hoist up and removes the temp copy.
+# maintainer path on screen), builds the fixture there and runs the
+# manifest/index suite (t-02) in the recording shell — a failure exits that
+# shell, so a GIF only comes out of a tree that passes it. The dry run is shown
+# as its last 22 lines (the full diff scrolls above; the caption says so).
+# Hidden teardown cleans the hoist up and removes the temp copy.
 
 Output demo.gif
 
@@ -27,7 +29,9 @@ Set Theme "Catppuccin Mocha"
 
 # --- setup, not recorded ---------------------------------------------------
 Hide
-Type `export HD=$(mktemp -d) && git clone -q . "$HD/hoist" && cd "$HD/hoist" && ./fixtures/make-fixture.sh >/dev/null && (tests/run.sh t-02 >/dev/null 2>&1 || exit 1) && cd .fixture/workshop && clear` Enter
+Type `export HD=$(mktemp -d) && git clone -q . "$HD/hoist" && cd "$HD/hoist" && ./fixtures/make-fixture.sh >/dev/null && cd .fixture/workshop && clear` Enter
+Sleep 4s
+Type `../../tests/run.sh t-02 >/dev/null 2>&1 || exit 1` Enter
 Sleep 12s
 Type "export PS1='$ ' HOIST=../../scripts/hoist NO_COLOR= && clear" Enter
 Sleep 1s
@@ -61,7 +65,8 @@ Type `"$HOIST" scan --state "$STATE" --run-gates` Sleep 300ms Enter
 Sleep 6s
 
 # --- dry run ---------------------------------------------------------------
-Type `"$HOIST" finish --state "$STATE" --title 'fix: trim keys when parsing' 2>&1 | tail -22` Sleep 300ms Enter
+Type "# dry run — the full diff scrolls by; showing the last 22 lines:" Sleep 300ms Enter
+Type `"$HOIST" finish --state "$STATE" --title 'fix: trim keys when parsing' 2>&1 | tail -22; test "${PIPESTATUS[0]}" -eq 0` Sleep 300ms Enter
 Sleep 6s
 
 Type "# nothing pushed. 'hoist push' is a separate command, for a later turn, on your yes." Sleep 400ms Enter

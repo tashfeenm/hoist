@@ -311,7 +311,7 @@ kv_get_all() {
 # not a defence against a same-user adversary, who could edit the repo
 # directly anyway.
 
-HOIST_STATE_KEYS="HOIST_VERSION HOIST_ID HOIST_REPO HOIST_WORKTREE HOIST_TMP HOIST_MANIFEST HOIST_BRANCH HOIST_TARGET HOIST_REMOTE HOIST_BASE_SHA HOIST_MERGE_BASE HOIST_FETCHED HOIST_UNRELATED"
+HOIST_STATE_KEYS="HOIST_VERSION HOIST_ID HOIST_REPO HOIST_WORKTREE HOIST_TMP HOIST_MANIFEST HOIST_MANIFEST_DIGEST HOIST_BRANCH HOIST_TARGET HOIST_REMOTE HOIST_REMOTE_URL HOIST_PUSH_URL HOIST_BASE_SHA HOIST_MERGE_BASE HOIST_FETCHED HOIST_UNRELATED"
 
 # state_write <file> — write the state from the HOIST_* variables currently
 # set. Files 0600, written whole then moved into place.
@@ -375,8 +375,15 @@ state_load() {
 	esac
 	case "$HOIST_MERGE_BASE" in
 	'') ;;
+	*[!0-9a-f]*) die "state has a malformed merge base" ;;
 	*) [ "${#HOIST_MERGE_BASE}" -eq "${#HOIST_BASE_SHA}" ] || die "state has a malformed merge base" ;;
 	esac
+	case "$HOIST_MANIFEST_DIGEST" in
+	*[!0-9a-f]*) die "state has a malformed manifest digest" ;;
+	esac
+	[ "${#HOIST_MANIFEST_DIGEST}" -eq "${#HOIST_BASE_SHA}" ] || die "state has a malformed manifest digest"
+	! has_control "$HOIST_REMOTE_URL$HOIST_PUSH_URL" || die "state has control characters in remote URLs"
+	[ -n "$HOIST_REMOTE_URL" ] || die "state has no remote URL"
 	case "$HOIST_FETCHED$HOIST_UNRELATED" in 00 | 01 | 10 | 11) ;; *) die "state has malformed flags" ;; esac
 	[ -n "$HOIST_BRANCH" ] && [ -n "$HOIST_TARGET" ] && [ -n "$HOIST_REMOTE" ] || die "state has an empty branch/target/remote"
 	! has_control "$HOIST_BRANCH$HOIST_TARGET$HOIST_REMOTE" || die "state has control characters in branch/target/remote"
@@ -408,8 +415,13 @@ state_load() {
 	canon="$(canon_file "$f")" || die "cannot resolve state file path"
 	[ "$canon" = "$HOIST_TMP/state" ] || die "state file must be <tmp>/state, got $canon"
 	[ -f "$HOIST_MANIFEST" ] && [ ! -L "$HOIST_MANIFEST" ] || die "manifest missing or a symlink: $HOIST_MANIFEST"
-
 	[ -n "$lenient" ] && return 0
+
+	# the manifest is frozen at prepare: a gate (or anyone) rewriting it is
+	# refused here, before any command trusts it (cleanup checks it itself,
+	# and only when it needs the manifest for its loss audit)
+	[ "$(manifest_digest "$HOIST_MANIFEST")" = "$HOIST_MANIFEST_DIGEST" ] ||
+		die "the manifest has been modified since prepare — refusing (run hoist cleanup --discard and prepare again)"
 
 	[ -d "$HOIST_WORKTREE" ] && [ ! -L "$HOIST_WORKTREE" ] || die "worktree missing: $HOIST_WORKTREE (run hoist cleanup)"
 	git -C "$HOIST_REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $HOIST_WORKTREE" >/dev/null ||
@@ -458,9 +470,20 @@ restage() {
 			GIT_LITERAL_PATHSPECS=1 git_h -C "$wt" rm -q --cached --ignore-unmatch -- "$p" || die "could not unstage $p"
 		fi
 	done <"$manifest"
+	# (a producer's failure inside a process substitution is invisible to the
+	# loop, so the list goes through a status-checked file)
+	local list="$HOIST_TMP/.staged.$$"
+	git -C "$wt" diff --cached --no-renames --name-only -z HEAD >"$list" || {
+		rm -f -- "$list"
+		die "could not list the staged paths"
+	}
 	while IFS= read -r -d '' f; do
-		in_manifest "$manifest" "$f" || die "index contains a path outside the manifest: $f"
-	done < <(git -C "$wt" diff --cached --no-renames --name-only -z HEAD)
+		in_manifest "$manifest" "$f" || {
+			rm -f -- "$list"
+			die "index contains a path outside the manifest: $f"
+		}
+	done <"$list"
+	rm -f -- "$list"
 }
 
 # staged_tree <worktree> — tree hash of the current index.
@@ -474,31 +497,85 @@ staged_status() { git -C "$1" diff --cached --no-renames --name-status -z HEAD; 
 manifest_digest() { digest_file "$1"; }
 
 # --- attestation / receipt / acknowledgement -------------------------------
+#
+# Every artifact is strict key=value with a fixed schema; unknown, duplicate
+# (unless repeatable) or malformed lines are refused, not ignored.
 
-# attest_verify <attest-file> <tree> — die unless the attestation exists and
-# is bound to this hoist (id, base), to <tree>, and to the current manifest.
+# kv_strict <file> <what> <keys> <repeatable-keys-or-prefixes> — die unless
+# every line is key=value with a known key, non-repeatable keys occur once,
+# and every listed key occurs at least once. Prefix keys end with '.'.
+kv_strict() {
+	local f="$1" what="$2" keys="$3" rep="$4" line k seen="" ok r
+	[ -f "$f" ] && [ ! -L "$f" ] || die "$what missing or a symlink: $f"
+	while IFS= read -r line || [ -n "$line" ]; do
+		[ -n "$line" ] || die "$what has an empty line"
+		case "$line" in *=*) ;; *) die "$what has a malformed line: $line" ;; esac
+		k="${line%%=*}"
+		ok=0
+		case " $keys " in *" $k "*) ok=1 ;; esac
+		for r in $rep; do
+			case "$r" in
+			*.) case "$k" in "$r"*) ok=2 ;; esac ;;
+			*) [ "$k" = "$r" ] && ok=2 ;;
+			esac
+		done
+		[ "$ok" -ne 0 ] || die "$what has an unknown key: $k"
+		if [ "$ok" -eq 1 ]; then
+			case " $seen " in *" $k "*) die "$what repeats key: $k" ;; esac
+			seen="$seen $k"
+		fi
+	done <"$f"
+	for k in $keys; do
+		case " $seen " in *" $k "*) ;; *) die "$what is missing key: $k" ;; esac
+	done
+}
+
+ATTEST_KEYS="version id base target branch tree manifest check.gates check.secrets check.personal check.drift gates_cmd gates_cmd_text findings findings_digest"
+RECEIPT_KEYS="version id tree attest message ack"
+ACK_KEYS="version id base tree attest findings"
+
+# attest_verify <attest-file> <tree> — die unless the attestation exists,
+# is well-formed, and is bound to this hoist (id, base, target, branch),
+# to <tree>, and to the frozen manifest; and its finding list is consistent
+# with its own count and digest.
 attest_verify() {
-	local f="$1" tree="$2" v
+	local f="$1" tree="$2" v n ids
 	[ -f "$f" ] && [ ! -L "$f" ] || die "no attestation — run hoist scan (all four checks) first"
-	[ "$(kv_get "$f" version || true)" = "1" ] || die "unsupported attestation version"
-	v="$(kv_get "$f" id || true)"
-	[ "$v" = "$HOIST_ID" ] || die "attestation belongs to a different hoist"
-	v="$(kv_get "$f" base || true)"
-	[ "$v" = "$HOIST_BASE_SHA" ] || die "attestation is for a different base — re-run hoist prepare"
-	v="$(kv_get "$f" manifest || true)"
-	[ "$v" = "$(manifest_digest "$HOIST_MANIFEST")" ] || die "attestation is for a different manifest — re-run hoist scan"
-	v="$(kv_get "$f" tree || true)"
+	kv_strict "$f" "attestation" "$ATTEST_KEYS" "finding"
+	[ "$(kv_get "$f" version)" = "1" ] || die "unsupported attestation version"
+	[ "$(kv_get "$f" id)" = "$HOIST_ID" ] || die "attestation belongs to a different hoist"
+	[ "$(kv_get "$f" base)" = "$HOIST_BASE_SHA" ] || die "attestation is for a different base — re-run hoist prepare"
+	[ "$(kv_get "$f" target)" = "$HOIST_REMOTE/$HOIST_TARGET" ] || die "attestation is for a different target — the state or the attestation was altered; re-run hoist scan"
+	[ "$(kv_get "$f" branch)" = "$HOIST_BRANCH" ] || die "attestation is for a different branch — the state or the attestation was altered; re-run hoist scan"
+	[ "$(kv_get "$f" manifest)" = "$HOIST_MANIFEST_DIGEST" ] || die "attestation is for a different manifest — re-run hoist scan"
+	for v in gates secrets personal drift; do
+		case "$(kv_get "$f" "check.$v")" in
+		*:clean | *:findings) ;;
+		*) die "attestation records check '$v' as not run — this attestation is not push-capable" ;;
+		esac
+	done
+	ids="$(kv_get_all "$f" finding | sort)"
+	n="$(printf '%s' "$ids" | grep -c . || true)"
+	[ "$(kv_get "$f" findings)" = "$n" ] || die "attestation finding count does not match its list"
+	[ "$(kv_get "$f" findings_digest)" = "$(digest_str "$ids")" ] || die "attestation findings digest does not match its list"
+	v="$(kv_get "$f" tree)"
 	[ "$v" = "$tree" ] ||
 		die "re-run hoist scan (tree changed since last scan: attested ${v:0:9}, now ${tree:0:9})"
 }
 
-# ack_valid <ack-file> <tree> <findings-digest> — true if an acknowledgement
-# file exists and is bound to this tree and findings set.
+# ack_valid <ack-file> <tree> <findings-digest> <attest-digest> — true if a
+# well-formed acknowledgement exists and is bound to this hoist, base, tree,
+# findings set and attestation.
 ack_valid() {
-	[ -f "$1" ] && [ ! -L "$1" ] || return 1
-	[ "$(kv_get "$1" version 2>/dev/null || true)" = "1" ] || return 1
-	[ "$(kv_get "$1" tree 2>/dev/null || true)" = "$2" ] || return 1
-	[ "$(kv_get "$1" findings 2>/dev/null || true)" = "$3" ] || return 1
+	local f="$1"
+	[ -f "$f" ] && [ ! -L "$f" ] || return 1
+	kv_strict "$f" "acknowledgement" "$ACK_KEYS" "ack." 2>/dev/null || return 1
+	[ "$(kv_get "$f" version)" = "1" ] || return 1
+	[ "$(kv_get "$f" id)" = "$HOIST_ID" ] || return 1
+	[ "$(kv_get "$f" base)" = "$HOIST_BASE_SHA" ] || return 1
+	[ "$(kv_get "$f" tree)" = "$2" ] || return 1
+	[ "$(kv_get "$f" findings)" = "$3" ] || return 1
+	[ "$(kv_get "$f" attest)" = "$4" ] || return 1
 }
 
 # text_looks_sensitive <text> — succeed (and print why to stderr) if the text
@@ -533,8 +610,38 @@ text_looks_sensitive() {
 
 # scrub_urls — strip userinfo (user:token@) out of URLs in text hoist echoes
 # from git, so an authenticated remote never leaks a token into a terminal
-# or a session log.
+# or a session log. Covers scheme URLs; scp-style "user@host:" carries no
+# password, and credentials in query strings are covered by redact_secrets.
 scrub_urls() { sed -E 's#(://)[^/@[:space:]]*@#\1#g'; }
+
+# redact_secrets — replace credential-shaped spans (the same shapes the
+# fallback scanner knows, plus token=/password= query values) with
+# [redacted]. Applied to every excerpt and gate-log tail hoist prints.
+redact_secrets() {
+	sed -E \
+		-e 's/AKIA[0-9A-Z]{16}/[redacted]/g' \
+		-e 's/gh[pousr]_[A-Za-z0-9]{20,}/[redacted]/g' \
+		-e 's#https://hooks\.slack\.com/services/[A-Za-z0-9/]{20,}#[redacted]#g' \
+		-e 's/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/[redacted]/g' \
+		-e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/[redacted]/' \
+		-e 's/([?&](token|access_token|password|secret|api_key|apikey|key)=)[^&[:space:]]*/\1[redacted]/gi'
+}
+
+# url_encode <text> — percent-encode everything but unreserved characters
+# and '/', for branch names in compare/MR links.
+url_encode() {
+	local s="$1" i c out=""
+	i=0
+	while [ "$i" -lt "${#s}" ]; do
+		c="${s:$i:1}"
+		case "$c" in
+		[A-Za-z0-9._~/-]) out="$out$c" ;;
+		*) out="$out$(printf '%%%02X' "'$c")" ;;
+		esac
+		i=$((i + 1))
+	done
+	printf '%s' "$out"
+}
 
 # web_host_path <remote-url> — "host path" (no scheme, no userinfo, no port,
 # no .git), or nothing if the URL shape is not recognised.

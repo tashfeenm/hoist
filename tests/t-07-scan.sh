@@ -44,7 +44,7 @@ if command -v gitleaks >/dev/null 2>&1; then
 	assert_not_grep 't/fixtures/keys\.txt' "$HOIST_ERR" "the decoy is scanned and stays clean (gitleaks + patterns)"
 	assert_eq "3" "$(printf '%s\n' "$HOIST_ERR" | grep -c '\[secrets-')" "exactly three secrets findings"
 else
-	printf '# gitleaks not installed — real-gitleaks assertions skipped\n'
+	skip "gitleaks not installed — real-gitleaks assertions skipped"
 fi
 
 # --- (2) gitleaks missing: fallback patterns, honest engine label -----------

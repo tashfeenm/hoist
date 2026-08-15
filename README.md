@@ -34,14 +34,25 @@ It branches off `origin/main` in a temporary worktree, copies in the current
 **state** of just those files, runs four checks, has Claude read the diff, shows
 you the full diff, and pushes only when you say so.
 
-**What is enforced, mechanically:** scan → full diff → receipt → your yes → push,
-all bound to one tree hash. The scan writes an attestation only when all four
-checks ran on the final tree; the dry run writes a receipt bound to that
-attestation; `push` is a separate command that refuses unless both still bind
-the tree that is staged *right now*, every finding is acknowledged by ID, and
-the target has not moved. Your yes is a separate turn and a separate permission
-prompt — the skill does not pre-approve `push`. Your working-tree files and
-index are never modified.
+**What the scripts enforce, mechanically:** scan → full diff → receipt →
+push, all bound to one tree hash, one remote (URLs bound at prepare), one
+target and one branch. The scan writes an attestation only when all four checks
+ran on the final tree and nothing else moved (files, refs, git config, the
+frozen manifest); the dry run writes a receipt bound to that attestation, the
+acknowledgements and the exact commit message; `push` is a separate command
+that refuses unless all of that still binds the tree that is staged *right
+now*, every finding is acknowledged by ID, the remote's URLs are the ones bound
+at prepare, and the target has not moved.
+
+**What the skill enforces, by protocol:** your yes is a *later* message, for
+the tree you saw. That is a rule in `SKILL.md` backed by Claude Code's
+permission prompt (`push` and `acknowledge` are not pre-approved by the skill),
+not something a script can prove — say so plainly: no artifact records that a
+human spoke.
+
+hoist itself never writes to your working-tree files or index. Repository
+gates and configured git helpers (filters, textconv, hooks the *gates* run) are
+the repository's own code and are not sandboxed by hoist.
 
 ## Install
 
@@ -100,7 +111,7 @@ simply produce no attestation, and `push` refuses.
 | Check | Catches |
 |---|---|
 | **gates** | The repo's own lint and tests, run *first* in the clean worktree so the other three checks see the post-gate tree. This is what can catch a reference left dangling because you forgot to include a file. Autodetected (`make lint/test/check`, npm `test`, `just test`) but never run silently — the scan prints the command and Claude passes `--run-gates` (or asks you) — and it is only as complete as the repo's own tests. Gates run the repository's own code with your credentials and network; the worktree isolates file state, not a security sandbox. Gate failures are absolute, not proven regressions against the target. There is no timeout; Ctrl-C is cancellation. |
-| **secrets** | Credentials in the hoisted files, scanned from the exact index blobs that would be committed. Shells out to `gitleaks` (exit-code aware; a report it cannot parse becomes an aggregate finding, never "clean"), layered over a small always-on pattern set for its known gaps. The AWS documentation examples are excluded by exact matched token — never by filename or surrounding text — because a scanner that cries wolf gets ignored. |
+| **secrets** | Credentials in the hoisted files, scanned from the exact index blobs that would be committed. Shells out to `gitleaks` (exit-code aware; a report it cannot parse becomes an aggregate finding, never "clean"), layered over a small always-on pattern set for its known gaps (a text-shaped grep run over the raw bytes; not a binary-format scanner). Exactly two published AWS documentation key IDs are excluded, by exact matched token — never a substring rule, never a filename — because a scanner that cries wolf gets ignored. |
 | **personal** | Home directories, usernames, hostnames, personal email — checked against the lines you are *adding*, not the whole file, so upstream's paths stay out of your report. Exact values are matched as fixed strings; only the generic path shapes are regexes. |
 | **drift** | A hoisted file that also moved on the target since your merge-base. Copying your state over it would **silently revert a teammate's work.** Compares content *and* mode/type. This is the check that is easy to miss and expensive to get wrong. |
 
@@ -111,8 +122,9 @@ the PR description.
 
 ## Try it — the fixture
 
-`fixtures/make-fixture.sh` builds a throwaway repo containing every case hoist
-has to handle. It is the demo and the substrate the test suite runs on.
+`fixtures/make-fixture.sh` builds a throwaway repo containing the canonical
+demo cases. It is the demo and the substrate the test suite runs on; the
+adversarial cases live in `tests/`.
 
 ```bash
 ./fixtures/make-fixture.sh
@@ -153,18 +165,23 @@ claims a clean sweep.
 
 ## Tests
 
-`tests/run.sh` runs the regression suite (`tests/t-*.sh`); `tests/run.sh --bash
-/bin/bash` runs it under macOS's bash 3.2. Every test builds its own fixture
-under `mktemp` and drives the real scripts. It covers: state-file containment
-(forged, symlinked, malformed, values with `=`); the manifest-only index (a gate
-that stages a stray file and edits an unlisted file gets neither committed) and
-the workshop's index/status/HEAD being byte-identical after every step; gates
-running first, failing honestly (`false | true`, `false; echo ok`), never
-running silently, and being unable to smuggle a mutated tree or a foreign
-commit past the attestation; and the protocol — push without scan, finish
-without scan, `--only`/`--skip-gates` yielding no attestation, edit-after-scan
-refusal, acknowledgement by ID, push refusing while findings are open. It does
-not yet cover every edge case listed below; those are the next matrix.
+`tests/run.sh` runs the regression suite (`tests/t-*.sh`, eleven files, ~420
+assertions); `tests/run.sh --bash /bin/bash` runs it under macOS's bash 3.2;
+`HOIST_TEST_STRICT=1` turns the two environment-dependent skips (no gitleaks,
+no submodule support) into failures for CI. Every test builds its own fixture
+under `mktemp` and drives the real scripts. Suites: state containment (forged,
+symlinked, malformed, edited target/branch, values with `=`); manifest-only
+index and untouched workshop; filenames and index edge cases; the drift matrix;
+gates (mutation, foreign commit, false-pass, silent-run, dangling ref, Ctrl-C);
+the scan→finish→acknowledge→push protocol; scan semantics (gitleaks present,
+missing, erroring, unparseable; the decoy; excerpt hygiene); hooks, filters and
+a failing signer; remotes and push (URLs, no token leaks, existing branch,
+target moved, `gh` failure, hosts); lifecycle and locks; and integrity
+(frozen manifest, push-URL swap, edited state, receipt-bound acknowledgements,
+textconv, `reference-transaction` hooks, unregistered worktrees, secret
+acknowledgement, long bodies). Not covered, by design: a real race between the
+final target check and the push (see below), and anything a deliberately
+malicious same-user process does to the state directory.
 
 ## Honest edge cases
 
@@ -194,9 +211,10 @@ not yet cover every edge case listed below; those are the next matrix.
   directories (name files).
 - **Sparse checkouts.** A tracked file that is absent because of
   skip-worktree is refused, not treated as a deletion. Materialise it first.
-- **Hooks, signing, filters, LFS.** hoist's own git commands (worktree add,
-  add, commit, push) run with hooks disabled — that is how your local hooks stay
-  local. Commit signing is left as you have it configured, so it may prompt or
+- **Hooks, signing, filters, LFS.** Every git command hoist itself issues
+  (fetch, worktree add, add, status, commit, branch delete, push) runs with
+  hooks disabled — that is how your local hooks stay local, `reference-
+  transaction` and `post-index-change` included; the tests pin it. Commit signing is left as you have it configured, so it may prompt or
   fail. Clean/smudge filters are untouched (they are still executable code with
   your ambient access); the secrets scan reads the index blobs, so scanned bytes
   are committed bytes. Because pre-push hooks are off, **Git LFS is
@@ -206,11 +224,23 @@ not yet cover every edge case listed below; those are the next matrix.
   finding. No merge-base is fatal unless you pass `--allow-unrelated-history`,
   in which case drift cannot run and stays a finding. Shallow clones are
   refused (`git fetch --unshallow`).
-- **The target moves after prepare.** `push` re-reads the remote and refuses;
-  prepare again from the new target — your yes was for the old tree.
-- **Ctrl-C, concurrency, cleanup.** prepare rolls back on interrupt. Two hoists
-  in one repo at once are refused by a lock rather than corrupting anything.
-  cleanup refuses to delete unpushed or unshipped work without `--discard`.
+- **The target moves after prepare.** `push` re-reads the remote before
+  committing and again right before pushing, and refuses; prepare again from
+  the new target — your yes was for the old tree. The push itself carries a
+  lease only on the *new* branch (git has no cross-ref lease), so a target
+  that moves in the instant between that last check and the push lands as a
+  PR against a moved target — the PR page shows it; hoist cannot prevent it.
+- **Ctrl-C, concurrency, cleanup.** prepare rolls back on interrupt (and
+  inspects what a half-made `worktree add` actually left). Two hoists in one
+  repo at once are refused by a lock rather than corrupting anything. cleanup
+  refuses to delete unpushed or unshipped work, or a worktree git no longer
+  lists, without `--discard`; ignored files (build outputs) are treated as
+  disposable; a branch the worktree was not on is never deleted.
+- **Gates can do anything the repo's code can**, including reach the network
+  or your main checkout, before your yes. hoist prints the command and never
+  runs an autodetected one silently, watches files, refs, config and the
+  manifest across the run, and refuses to attest if any moved — but that is
+  detection after the fact, not a sandbox.
 - **`.hoist/`.** The worktree lives at `<repo>/.hoist/<id>/tree`, ignored via
   one owned `/.hoist/` line in `.git/info/exclude` that hoist writes once and
   leaves in place. Don't `git clean -ffdx` while a hoist is active (it would

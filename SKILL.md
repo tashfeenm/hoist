@@ -1,6 +1,6 @@
 ---
 name: hoist
-description: Lift the current state of specific files out of a dirty working repo onto a clean branch off origin/<target>, run four safety checks, and open a PR. Use when the user wants to ship, promote, upstream, or PR some of their local changes while leaving the rest of their mess in place — "hoist these to main", "PR just the parser fix", "get this out of my dirty repo".
+description: Lift the current state of specific files out of a dirty working repo onto a clean branch off origin/<target>, run four safety checks, show the full diff, and — on a later explicit yes — push and open a PR (or push the branch and hand over the link). Use when the user wants to ship, promote, upstream, or PR some of their local changes while leaving the rest of their mess in place — "hoist these to main", "PR just the parser fix", "get this out of my dirty repo".
 disable-model-invocation: true
 argument-hint: "[files...] to <branch>"
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/hoist prepare *) Bash(${CLAUDE_SKILL_DIR}/scripts/hoist scan *) Bash(${CLAUDE_SKILL_DIR}/scripts/hoist finish *) Bash(${CLAUDE_SKILL_DIR}/scripts/hoist cleanup *) Bash(${CLAUDE_SKILL_DIR}/scripts/hoist help *)
@@ -19,10 +19,16 @@ Two rules that never bend:
 
 1. **File states, never commits.** The dirty repo's history is irrelevant. There
    is no cherry-picking and no rebasing. Ever.
-2. **Nothing is pushed without the human's explicit yes, in a later turn, for
-   the exact tree they saw.** See the STOP rule below. It is not a formality:
-   `hoist push` is a separate command that is deliberately *not* pre-approved by
-   this skill, so it will hit the normal permission prompt when its turn comes.
+2. **hoist pushes nothing without the human's explicit yes, in a later turn,
+   for the exact tree they saw.** See the STOP rule below. Be clear about what
+   enforces what: the scripts mechanically bind scan → full diff → receipt →
+   push to one tree hash, one remote, one target and one branch, and refuse
+   otherwise. The *later turn* is enforced by this skill's protocol and by
+   Claude Code's permission prompt — `hoist push` and `hoist acknowledge` are
+   deliberately not pre-approved by this skill (they still exist; you can
+   still be asked to run them; the rule is that you do not until the yes).
+   Repository gates are the repository's own code and are outside this
+   promise: they run before the yes and can do anything that code can.
 
 ## How the commands fit together
 
@@ -65,7 +71,8 @@ This fetches `origin/<target>`, branches off it in a temporary worktree at
 `<repo>/.hoist/<id>/tree` (inside the project, excluded from `git status`, so
 editing there needs no extra permission), and copies in the current state of
 exactly those files — preserving exec bits, handling deletions and untracked
-files. **The user's working tree and index are never modified.**
+files. **hoist itself never modifies the user's working tree or index** (the
+repository's own gates are outside that promise — see §3).
 
 It prints `state: <path>` — record that path. The worktree is the `tree/`
 directory beside it. If prepare says "nothing differs", stop: there is nothing
@@ -102,7 +109,8 @@ first** and pass exactly what they approve. `--gates true` is the honest option
 for a repo that truly has no checks; it is recorded in the attestation.
 
 **No attestation** results from `--only`, `--skip-gates`, gates that were not
-run, gates that modified a hoisted file, or gates that touched HEAD/refs. These
+run, gates that modified a hoisted file, or gates that touched HEAD, refs, git
+configuration or the manifest. These
 are not findings and cannot be acknowledged; the summary line says so. Fix the
 cause and re-run the full scan.
 
@@ -111,7 +119,7 @@ cause and re-run the full scan.
 The scripts find what is mechanical. Do the rest, reading the actual diff:
 
 ```bash
-git -C <state dir>/tree diff --cached      # this is what would be pushed
+git -C <state dir>/tree diff --cached --no-renames --no-ext-diff --no-textconv HEAD   # raw blobs: what would be pushed
 ```
 
 Edit **only the manifest paths** under `<state dir>/tree`. If the change needs
@@ -154,11 +162,14 @@ always checks your current state; and any edit voids the previous attestation.
 ${CLAUDE_SKILL_DIR}/scripts/hoist acknowledge --state <path> --finding <id> --reason "..."
 ```
 
-This is for a legitimate `/home/runner` in CI config, a drift case you resolved
-by hand, a fixture that intentionally contains an example token. It is never
-for a live credential — remove those. It cannot make a skipped check, an
-unrun gate or a gate mutation go away; those are not findings. `acknowledge`
-is not pre-approved by this skill either: it prompts.
+This is for a legitimate `/home/runner` in CI config, or a drift case you
+resolved by hand. `secrets-*` findings are refused outright: a live credential
+is removed from the copy, never acknowledged; only a documented example value
+in a test fixture justifies `--allow-secret`, and that flag lands in the
+trailer. Acknowledging voids the dry-run receipt — run `finish` again so the
+trailers are part of the message the user sees. It cannot make a skipped
+check, an unrun gate or a gate mutation go away; those are not findings.
+`acknowledge` is not pre-approved by this skill either: it prompts.
 
 ### 5. Dry run — then STOP
 
@@ -188,8 +199,9 @@ ${CLAUDE_SKILL_DIR}/scripts/hoist push --state <path>
 ```
 
 Push re-checks everything against the tree that is staged *right now*
-(attestation, receipt, acknowledgements, target unmoved, branch absent on the
-remote), makes exactly one commit (hooks disabled; commit signing as the user
+(attestation, receipt, acknowledgements, the remote's URLs unchanged since
+prepare, target unmoved, branch absent on the remote), makes exactly one commit
+with the reviewed message verbatim (hooks disabled; commit signing as the user
 has it configured — it may prompt or fail, say so if it does), pushes with a
 lease that expects the branch to be absent, and opens the PR with `gh` when the
 remote is GitHub and `gh` is authenticated — otherwise it prints the compare

@@ -6,6 +6,8 @@
 #   tests/run.sh t-01 t-03          # a subset, by prefix
 #   tests/run.sh --bash /bin/bash   # run scripts AND tests under that bash
 #                                   # (macOS ships 3.2 there; hoist must pass)
+#   HOIST_TEST_STRICT=1 tests/run.sh   # skipped cases (no gitleaks, no
+#                                      # submodule support) count as failures
 #
 # Each test is a bash script printing TAP-ish lines; this runner counts files
 # and lines and exits nonzero on any failure. Tests build their own fixtures
@@ -53,7 +55,7 @@ fi
 echo "# hoist tests — $("$BASH_BIN" --version | head -1)"
 echo "# git $(git --version | sed 's/^git version //')"
 
-files=0 failed=0 pass_lines=0 fail_lines=0
+files=0 failed=0 pass_lines=0 fail_lines=0 skips=0
 for t in "$HERE"/t-*.sh; do
 	[ -e "$t" ] || continue
 	name="$(basename "$t" .sh)"
@@ -69,14 +71,22 @@ for t in "$HERE"/t-*.sh; do
 	printf '%s\n' "$out" | sed 's/^/    /'
 	p="$(printf '%s\n' "$out" | grep -c '^ok ')"
 	f="$(printf '%s\n' "$out" | grep -c '^not ok ')"
+	sk="$(printf '%s\n' "$out" | grep -c '^# SKIP ')"
+	plan="$(printf '%s\n' "$out" | grep -E '^1\.\.[0-9]+$' | tail -1 | sed 's/^1\.\.//')"
 	pass_lines=$((pass_lines + p))
 	fail_lines=$((fail_lines + f))
-	if [ "$rc" -ne 0 ] || [ "$f" -gt 0 ]; then
+	skips=$((skips + sk))
+	# the plan is required and must account for every assertion line: a
+	# script that dies before done_testing, or emits no assertions, fails
+	if [ -z "$plan" ] || [ "$plan" -ne $((p + f)) ] || [ "$plan" -eq 0 ]; then
+		failed=$((failed + 1))
+		echo "# FAIL $name (plan '${plan:-none}' vs $((p + f)) assertion lines)"
+	elif [ "$rc" -ne 0 ] || [ "$f" -gt 0 ]; then
 		failed=$((failed + 1))
 		echo "# FAIL $name (exit $rc)"
 	fi
 done
 
 echo "#"
-echo "# $files files, $pass_lines assertions passed, $fail_lines failed, $failed file(s) failing"
+echo "# $files files, $pass_lines assertions passed, $fail_lines failed, $skips skipped, $failed file(s) failing"
 [ "$failed" -eq 0 ] && [ "$files" -gt 0 ]
