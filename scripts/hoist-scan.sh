@@ -81,6 +81,9 @@ done
 state_load "$STATE"
 lock_state
 trap 'unlock_state' EXIT
+trap 'unlock_state; trap - EXIT; exit 130' INT
+trap 'unlock_state; trap - EXIT; exit 143' TERM
+trap 'unlock_state; trap - EXIT; exit 129' HUP
 # Backstop only: bash 3.2 ERR traps miss conditionals, functions and process
 # substitutions, so every step below also checks its own status explicitly.
 trap 'die "scan aborted — operational error (line $LINENO)"' ERR
@@ -235,7 +238,7 @@ scan_gates() {
 	fi
 	if [ "$t0" != "$t1" ]; then
 		changed="$(git -C "$WT" diff-tree -r --no-renames --name-only "$t0" "$t1" | tr '\n' ' ')"
-		finding gates "gates" "mutated" "the gates modified hoisted files ($changed) — no attestation; re-run hoist scan to check the new tree"
+		finding gates "gates" "mutated" "hoisted files changed across the gates run ($changed): a formatter, or a nondeterministic clean filter — no attestation; re-run hoist scan (an idempotent formatter converges)"
 		MUTATED=1
 	fi
 	local extra
@@ -295,10 +298,12 @@ scan_secrets() {
 				finding secrets "$file:$line" "$rule" "$rule ${C_DIM}(gitleaks)${C_OFF}"
 				parsed=$((parsed + 1))
 			done < <(awk '
-				/"RuleID":/    { r=$0; sub(/^[^:]*: *"/,"",r); sub(/",?$/,"",r) }
-				/"StartLine":/ { l=$0; sub(/^[^:]*: */,"",l); sub(/,$/,"",l) }
-				/"File":/      { f=$0; sub(/^[^:]*: *"/,"",f); sub(/",?$/,"",f) }
-				/"Fingerprint":/ { if (r != "") print r "\t" f "\t" l; r=""; f=""; l="" }
+				# strict, one-field-per-line shapes only; anything else parses
+				# as zero records and becomes the aggregate finding below
+				/^[[:space:]]*"RuleID":[[:space:]]*"[^"]*",?[[:space:]]*$/    { r=$0; sub(/^[^:]*:[[:space:]]*"/,"",r); sub(/",?[[:space:]]*$/,"",r) }
+				/^[[:space:]]*"StartLine":[[:space:]]*[0-9]+,?[[:space:]]*$/ { l=$0; sub(/^[^:]*:[[:space:]]*/,"",l); sub(/,?[[:space:]]*$/,"",l) }
+				/^[[:space:]]*"File":[[:space:]]*"[^"]*",?[[:space:]]*$/      { f=$0; sub(/^[^:]*:[[:space:]]*"/,"",f); sub(/",?[[:space:]]*$/,"",f) }
+				/^[[:space:]]*"Fingerprint":/ { if (r != "" && f != "" && l != "") print r "\t" f "\t" l; r=""; f=""; l="" }
 			' "$report" 2>/dev/null || true)
 			reported="$(grep -c '"Fingerprint"' "$report" 2>/dev/null || true)"
 			own="$(sed -n 's/.*leaks found: *\([0-9][0-9]*\).*/\1/p' "$log" | tail -1)"
@@ -485,9 +490,9 @@ scan_drift() {
 		elif [ -z "$ix" ]; then
 			rule="delete-vs-change" kind="you delete it, but it changed upstream ($n commit(s)) — manual review"
 		elif [ "$mb_mode" = 120000 ] || [ "$tg_mode" = 120000 ] || [ "$ix_mode" = 120000 ]; then
-			rule="type" kind="file/symlink type involved (upstream $mb_mode→$tg_mode, yours $ix_mode) — manual review"
+			rule="type" kind="file/symlink type involved (upstream ${mb_mode}→${tg_mode}, yours $ix_mode) — manual review"
 		elif [ "$mb_mode" != "$tg_mode" ] && [ "$ix_mode" != "$tg_mode" ]; then
-			rule="mode" kind="mode changed upstream ($mb_mode→$tg_mode) but your copy is $ix_mode — chmod the copy in the worktree"
+			rule="mode" kind="mode changed upstream (${mb_mode}→${tg_mode}) but your copy is $ix_mode — chmod the copy in the worktree"
 			[ "${mb#* }" = "${tg#* }" ] || kind="$kind (content changed upstream too)"
 		elif git -C "$HOIST_REPO" diff --numstat "$HOIST_MERGE_BASE" "$HOIST_BASE_SHA" -- "$p" 2>/dev/null | grep -q "$(printf '^-\t-\t')"; then
 			rule="binary" kind="binary — changed upstream ($n commit(s)); resolve by hand"

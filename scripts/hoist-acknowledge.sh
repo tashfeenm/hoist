@@ -56,6 +56,9 @@ done
 state_load "$STATE"
 lock_state
 trap 'unlock_state' EXIT
+trap 'unlock_state; trap - EXIT; exit 130' INT
+trap 'unlock_state; trap - EXIT; exit 143' TERM
+trap 'unlock_state; trap - EXIT; exit 129' HUP
 trap 'die "acknowledge aborted — operational error (line $LINENO)"' ERR
 WT="$HOIST_WORKTREE"
 TMP="$HOIST_TMP"

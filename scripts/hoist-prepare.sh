@@ -126,7 +126,7 @@ done
 
 if [ "$FETCH" -eq 1 ]; then
 	dim "fetching $REMOTE/$TARGET ..."
-	fetch_err="$(git -C "$REPO" fetch -q "$REMOTE" "$TARGET" 2>&1 >/dev/null)" ||
+	fetch_err="$(git -C "$REPO" fetch -q "$REMOTE" "$TARGET" 2>&1 >/dev/null | scrub_urls)" ||
 		die "could not fetch $REMOTE/$TARGET: ${fetch_err:-no details from git}. Fix the connection, or pass --no-fetch to hoist against the local copy (drift will then be reported as stale)."
 fi
 
@@ -161,33 +161,6 @@ done
 
 # --- the workspace: <repo>/.hoist/<id>/ ------------------------------------
 
-lock_repo "$REPO"
-
-HDIR="$REPO/.hoist"
-[ ! -L "$HDIR" ] || die "$HDIR is a symlink — refusing to use it as hoist's workspace"
-[ ! -e "$HDIR" ] || [ -d "$HDIR" ] || die "$HDIR exists and is not a directory"
-[ -z "$(git -C "$REPO" ls-files -- .hoist 2>/dev/null | head -1)" ] ||
-	die "$HDIR contains tracked files — hoist needs it as an untracked workspace"
-
-# One owned, root-anchored exclude rule, written once and left in place.
-excl="$(git -C "$REPO" rev-parse --git-path info/exclude)"
-case "$excl" in /*) ;; *) excl="$REPO/$excl" ;; esac
-[ ! -L "$excl" ] || die "$excl is a symlink — refusing to edit it"
-mkdir -p -- "$(dirname -- "$excl")"
-[ -e "$excl" ] || : >"$excl"
-if ! grep -qFx -- '/.hoist/' "$excl"; then
-	# keep a pre-existing last line intact if it lacks its newline
-	[ -z "$(tail -c1 -- "$excl")" ] || printf '\n' >>"$excl"
-	printf '# hoist: temporary worktrees (this line is owned by hoist and safe to keep)\n/.hoist/\n' >>"$excl"
-fi
-git -C "$REPO" check-ignore -q -- .hoist/probe 2>/dev/null ||
-	die "the /.hoist/ exclude rule does not take effect (a higher-precedence negation?) — refusing to create an unignored worktree inside your repo"
-
-TMP="$HDIR/$ID"
-WORKTREE="$TMP/tree"
-STATE="$TMP/state"
-MANIFEST="$TMP/manifest"
-
 CREATED_TMP=0 CREATED_WT=0 COMMITTED=0 ROLLED=0
 rollback() {
 	[ "$ROLLED" -eq 0 ] || return 0
@@ -216,10 +189,37 @@ on_sig() {
 	trap - EXIT
 	exit "$1"
 }
+lock_repo "$REPO"
 trap on_exit EXIT
 trap 'on_sig 130' INT
 trap 'on_sig 143' TERM
 trap 'on_sig 129' HUP
+
+HDIR="$REPO/.hoist"
+[ ! -L "$HDIR" ] || die "$HDIR is a symlink — refusing to use it as hoist's workspace"
+[ ! -e "$HDIR" ] || [ -d "$HDIR" ] || die "$HDIR exists and is not a directory"
+[ -z "$(git -C "$REPO" ls-files -- .hoist 2>/dev/null | head -1)" ] ||
+	die "$HDIR contains tracked files — hoist needs it as an untracked workspace"
+
+# One owned, root-anchored exclude rule, written once and left in place.
+excl="$(git -C "$REPO" rev-parse --git-path info/exclude)"
+case "$excl" in /*) ;; *) excl="$REPO/$excl" ;; esac
+[ ! -L "$excl" ] || die "$excl is a symlink — refusing to edit it"
+mkdir -p -- "$(dirname -- "$excl")"
+[ -e "$excl" ] || : >"$excl"
+if ! grep -qFx -- '/.hoist/' "$excl"; then
+	# keep a pre-existing last line intact if it lacks its newline
+	[ -z "$(tail -c1 -- "$excl")" ] || printf '\n' >>"$excl"
+	printf '# hoist: temporary worktrees (this line is owned by hoist and safe to keep)\n/.hoist/\n' >>"$excl"
+fi
+git -C "$REPO" check-ignore -q -- .hoist/probe 2>/dev/null ||
+	die "the /.hoist/ exclude rule does not take effect (a higher-precedence negation?) — refusing to create an unignored worktree inside your repo"
+
+TMP="$HDIR/$ID"
+WORKTREE="$TMP/tree"
+STATE="$TMP/state"
+MANIFEST="$TMP/manifest"
+
 
 (
 	umask 077

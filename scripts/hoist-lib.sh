@@ -480,11 +480,15 @@ manifest_digest() { digest_file "$1"; }
 attest_verify() {
 	local f="$1" tree="$2" v
 	[ -f "$f" ] && [ ! -L "$f" ] || die "no attestation — run hoist scan (all four checks) first"
-	[ "$(kv_get "$f" version)" = "1" ] || die "unsupported attestation version"
-	v="$(kv_get "$f" id)" && [ "$v" = "$HOIST_ID" ] || die "attestation belongs to a different hoist"
-	v="$(kv_get "$f" base)" && [ "$v" = "$HOIST_BASE_SHA" ] || die "attestation is for a different base — re-run hoist prepare"
-	v="$(kv_get "$f" manifest)" && [ "$v" = "$(manifest_digest "$HOIST_MANIFEST")" ] || die "attestation is for a different manifest — re-run hoist scan"
-	v="$(kv_get "$f" tree)" && [ "$v" = "$tree" ] ||
+	[ "$(kv_get "$f" version || true)" = "1" ] || die "unsupported attestation version"
+	v="$(kv_get "$f" id || true)"
+	[ "$v" = "$HOIST_ID" ] || die "attestation belongs to a different hoist"
+	v="$(kv_get "$f" base || true)"
+	[ "$v" = "$HOIST_BASE_SHA" ] || die "attestation is for a different base — re-run hoist prepare"
+	v="$(kv_get "$f" manifest || true)"
+	[ "$v" = "$(manifest_digest "$HOIST_MANIFEST")" ] || die "attestation is for a different manifest — re-run hoist scan"
+	v="$(kv_get "$f" tree || true)"
+	[ "$v" = "$tree" ] ||
 		die "re-run hoist scan (tree changed since last scan: attested ${v:0:9}, now ${tree:0:9})"
 }
 
@@ -492,9 +496,9 @@ attest_verify() {
 # file exists and is bound to this tree and findings set.
 ack_valid() {
 	[ -f "$1" ] && [ ! -L "$1" ] || return 1
-	[ "$(kv_get "$1" version 2>/dev/null)" = "1" ] || return 1
-	[ "$(kv_get "$1" tree 2>/dev/null)" = "$2" ] || return 1
-	[ "$(kv_get "$1" findings 2>/dev/null)" = "$3" ] || return 1
+	[ "$(kv_get "$1" version 2>/dev/null || true)" = "1" ] || return 1
+	[ "$(kv_get "$1" tree 2>/dev/null || true)" = "$2" ] || return 1
+	[ "$(kv_get "$1" findings 2>/dev/null || true)" = "$3" ] || return 1
 }
 
 # text_looks_sensitive <text> — succeed (and print why to stderr) if the text
@@ -524,3 +528,42 @@ text_looks_sensitive() {
 	printf '%s\n' "$why" >&2
 	return 0
 }
+
+# --- remote URLs -----------------------------------------------------------
+
+# scrub_urls — strip userinfo (user:token@) out of URLs in text hoist echoes
+# from git, so an authenticated remote never leaks a token into a terminal
+# or a session log.
+scrub_urls() { sed -E 's#(://)[^/@[:space:]]*@#\1#g'; }
+
+# web_host_path <remote-url> — "host path" (no scheme, no userinfo, no port,
+# no .git), or nothing if the URL shape is not recognised.
+web_host_path() {
+	local u="$1" scheme rest hostport host path
+	case "$u" in
+	*://*)
+		scheme="${u%%://*}"
+		rest="${u#*://}"
+		hostport="${rest%%/*}"
+		path="${rest#*/}"
+		[ "$path" != "$rest" ] || path=""
+		hostport="${hostport##*@}"
+		host="${hostport%%:*}"
+		case "$scheme" in http | https | ssh | git) ;; *) return 0 ;; esac
+		;;
+	*@*:* | *:*)
+		# scp-like: [user@]host:path
+		case "$u" in /* | ./*) return 0 ;; esac
+		host="${u%%:*}"
+		host="${host##*@}"
+		path="${u#*:}"
+		;;
+	*) return 0 ;;
+	esac
+	path="${path%/}"
+	path="${path%.git}"
+	path="${path#/}"
+	[ -n "$host" ] && [ -n "$path" ] || return 0
+	printf '%s %s\n' "$host" "$path"
+}
+

@@ -21,7 +21,7 @@ WT="$(state_get "$S" HOIST_WORKTREE)"
 GATE="if [ ! -f .gate-ran ]; then printf '\nAWS_KEY=$TOKEN\n' >>src/parser.sh; touch .gate-ran; fi"
 hoist scan --state "$S" --gates "$GATE"
 assert_status 1 $? "scan reports the mutation"
-assert_grep 'gates modified hoisted files' "$HOIST_ERR" "mutation is named"
+assert_grep 'changed across the gates run' "$HOIST_ERR" "mutation is named"
 assert_grep 'NO attestation' "$HOIST_ERR" "no attestation announced"
 assert_no_file "$TMP/attest" "no attestation after a gate mutation"
 hoist push --state "$S" --no-pr

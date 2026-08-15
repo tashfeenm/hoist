@@ -77,4 +77,25 @@ assert_false "still nothing on origin (2)" origin_branch_exists "$ORIGIN" "$BRAN
 hoist cleanup --state "$S" --discard
 assert_status 0 $? "cleanup --discard"
 
+# --- the dry run shows everything: deletion, binary, symlink, mode-only ------
+printf 'BIN\000\001\002\n' >"$WORKSHOP/blob.bin"
+ln -s src/parser.sh "$WORKSHOP/link.sh"
+chmod +x "$WORKSHOP/src/config.sh"
+hoist prepare --repo "$WORKSHOP" --target main -- src/legacy.sh blob.bin link.sh src/config.sh
+assert_status 0 $? "prepare with a deletion, a binary, a symlink and a mode-only change"
+S="$(state_path)"
+assert_grep 'type      src/config\.sh|modified  src/config\.sh' "$HOIST_ERR" "config.sh listed"
+hoist scan --state "$S" --gates true >/dev/null 2>&1
+ids="$(grep '^finding=' "$(state_get "$S" HOIST_TMP)/attest" | sed 's/finding=//')"
+for id in $ids; do hoist acknowledge --state "$S" --finding "$id" --reason "test" >/dev/null 2>&1; done
+hoist finish --state "$S" --title "everything visible"
+assert_status 0 $? "finish"
+assert_grep 'deleted file mode 100644' "$HOIST_ERR" "deletion visible in the full diff"
+assert_grep 'Binary files .* differ|GIT binary patch' "$HOIST_ERR" "binary visible in the full diff"
+assert_grep 'new file mode 120000' "$HOIST_ERR" "symlink visible in the full diff"
+assert_grep 'mode change 100644 => 100755 src/config\.sh' "$HOIST_ERR" "mode-only change visible in the summary"
+assert_grep 'this is exactly what would land' "$HOIST_ERR" "the diff is labelled as the thing that lands"
+hoist cleanup --state "$S" --discard >/dev/null 2>&1
+rm -f "$WORKSHOP/blob.bin" "$WORKSHOP/link.sh"
+
 done_testing

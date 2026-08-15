@@ -54,6 +54,9 @@ done
 state_load "$STATE"
 lock_state
 trap 'unlock_state' EXIT
+trap 'unlock_state; trap - EXIT; exit 130' INT
+trap 'unlock_state; trap - EXIT; exit 143' TERM
+trap 'unlock_state; trap - EXIT; exit 129' HUP
 trap 'die "finish aborted — operational error (line $LINENO)"' ERR
 WT="$HOIST_WORKTREE"
 TMP="$HOIST_TMP"
@@ -123,7 +126,8 @@ if [ "$NF" -gt 0 ]; then
 	while IFS= read -r id; do
 		[ -n "$id" ] || continue
 		txt="$(awk -F'\t' -v i="$id" '$1==i {print $3 "  " $4; exit}' "$TMP/findings.txt" 2>/dev/null || true)"
-		if ack_valid "$TMP/ack" "$TREE" "$FD" && reason="$(kv_get "$TMP/ack" "ack.$id" 2>/dev/null)"; then
+		reason="$(kv_get "$TMP/ack" "ack.$id" 2>/dev/null || true)"
+		if [ -n "$reason" ] && ack_valid "$TMP/ack" "$TREE" "$FD"; then
 			printf '    %s%-20s%s %s  %sacknowledged: %s%s\n' "$C_DIM" "$id" "$C_OFF" "$txt" "$C_GRN" "$reason" "$C_OFF" >&2
 		else
 			printf '    %s%-20s%s %s  %sunacknowledged%s\n' "$C_YEL" "$id" "$C_OFF" "$txt" "$C_YEL" "$C_OFF" >&2

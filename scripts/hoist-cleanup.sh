@@ -54,6 +54,9 @@ state_load "$STATE" lenient
 lock_repo "$HOIST_REPO"
 lock_state
 trap 'unlock_state; unlock_repo' EXIT
+trap 'unlock_state; unlock_repo; trap - EXIT; exit 130' INT
+trap 'unlock_state; unlock_repo; trap - EXIT; exit 143' TERM
+trap 'unlock_state; unlock_repo; trap - EXIT; exit 129' HUP
 trap 'die "cleanup aborted — operational error (line $LINENO)"' ERR
 
 REPO="$HOIST_REPO" WT="$HOIST_WORKTREE" TMP="$HOIST_TMP" B="$HOIST_BRANCH"

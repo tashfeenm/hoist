@@ -57,6 +57,9 @@ done
 state_load "$STATE"
 lock_state
 trap 'unlock_state' EXIT
+trap 'unlock_state; trap - EXIT; exit 130' INT
+trap 'unlock_state; trap - EXIT; exit 143' TERM
+trap 'unlock_state; trap - EXIT; exit 129' HUP
 trap 'die "push aborted — operational error (line $LINENO)"' ERR
 WT="$HOIST_WORKTREE"
 TMP="$HOIST_TMP"
@@ -72,11 +75,11 @@ attest_verify "$A" "$TREE"
 
 R="$TMP/receipt"
 [ -f "$R" ] && [ ! -L "$R" ] || die "no dry-run receipt — run hoist finish first (and show the human the full diff)"
-[ "$(kv_get "$R" version)" = "1" ] || die "unsupported receipt version"
-[ "$(kv_get "$R" id)" = "$HOIST_ID" ] || die "receipt belongs to a different hoist"
-[ "$(kv_get "$R" tree)" = "$TREE" ] || die "receipt is for a different tree — re-run hoist finish"
-[ "$(kv_get "$R" attest)" = "$(digest_file "$A")" ] || die "receipt is for a different attestation — re-run hoist finish"
-[ -f "$TMP/message" ] && [ "$(kv_get "$R" message)" = "$(digest_file "$TMP/message")" ] ||
+[ "$(kv_get "$R" version || true)" = "1" ] || die "unsupported receipt version"
+[ "$(kv_get "$R" id || true)" = "$HOIST_ID" ] || die "receipt belongs to a different hoist"
+[ "$(kv_get "$R" tree || true)" = "$TREE" ] || die "receipt is for a different tree — re-run hoist finish"
+[ "$(kv_get "$R" attest || true)" = "$(digest_file "$A")" ] || die "receipt is for a different attestation — re-run hoist finish"
+[ -f "$TMP/message" ] && [ "$(kv_get "$R" message || true)" = "$(digest_file "$TMP/message")" ] ||
 	die "receipt does not match the message — re-run hoist finish"
 
 FD="$(kv_get "$A" findings_digest)"
@@ -98,12 +101,15 @@ fi
 # --- the remote must still be where we prepared from ------------------------
 
 dim "checking $HOIST_REMOTE/$HOIST_TARGET ..."
+# (status-bearing commands never run inside $(...): with errtrace, bash 3.2
+# would fire the ERR trap in the subshell and replace git's status with 2)
 rc=0
-remote_sha="$(git -C "$HOIST_REPO" ls-remote --exit-code -- "$HOIST_REMOTE" "refs/heads/$HOIST_TARGET" 2>"$TMP/ls-remote.err" | cut -f1)" || rc=$?
+git -C "$HOIST_REPO" ls-remote --exit-code -- "$HOIST_REMOTE" "refs/heads/$HOIST_TARGET" >"$TMP/ls-remote.out" 2>"$TMP/ls-remote.err" || rc=$?
+remote_sha="$(cut -f1 <"$TMP/ls-remote.out")"
 case "$rc" in
 0) ;;
 2) die "$HOIST_REMOTE/$HOIST_TARGET no longer exists on the remote" ;;
-*) die "could not reach $HOIST_REMOTE (ls-remote exit $rc): $(tr '\n' ' ' <"$TMP/ls-remote.err")" ;;
+*) die "could not reach $HOIST_REMOTE (ls-remote exit $rc): $(scrub_urls <"$TMP/ls-remote.err" | tr '\n' ' ')" ;;
 esac
 [ "$remote_sha" = "$HOIST_BASE_SHA" ] ||
 	die "target moved: $HOIST_REMOTE/$HOIST_TARGET is now ${remote_sha:0:9} (prepared from ${HOIST_BASE_SHA:0:9}) — hoist cleanup --discard, then prepare again from the new target"
@@ -128,7 +134,7 @@ if [ "$NF" -gt 0 ]; then
 fi
 
 if ! git_h -C "$WT" commit -q -F "$MSG" 2>"$TMP/commit.err"; then
-	sed 's/^/  /' "$TMP/commit.err" >&2
+	scrub_urls <"$TMP/commit.err" | sed 's/^/  /' >&2
 	die "commit failed (identity or signing not configured? hoist leaves signing as configured)"
 fi
 NEW="$(git -C "$WT" rev-parse HEAD)"
@@ -138,9 +144,9 @@ verify_fail() {
 	undo
 	die "$1 — the commit was undone; nothing was pushed"
 }
-[ "$(git -C "$WT" rev-parse "$NEW^" 2>/dev/null)" = "$HOIST_BASE_SHA" ] || verify_fail "the new commit's parent is not the base"
-[ "$(git -C "$WT" rev-list --count "$HOIST_BASE_SHA..$NEW")" = "1" ] || verify_fail "more than one commit on top of the base"
-[ "$(git -C "$WT" rev-parse "$NEW^{tree}")" = "$TREE" ] || verify_fail "the committed tree is not the attested tree"
+[ "$(git -C "$WT" rev-parse "$NEW^" 2>/dev/null || true)" = "$HOIST_BASE_SHA" ] || verify_fail "the new commit's parent is not the base"
+[ "$(git -C "$WT" rev-list --count "$HOIST_BASE_SHA..$NEW" 2>/dev/null || true)" = "1" ] || verify_fail "more than one commit on top of the base"
+[ "$(git -C "$WT" rev-parse "$NEW^{tree}" 2>/dev/null || true)" = "$TREE" ] || verify_fail "the committed tree is not the attested tree"
 while IFS= read -r -d '' p; do
 	in_manifest "$HOIST_MANIFEST" "$p" || verify_fail "the commit touches a path outside the manifest: $p"
 done < <(git -C "$WT" diff-tree --no-commit-id --no-renames --name-only -r -z "$NEW")
@@ -149,7 +155,7 @@ info "committed ${NEW:0:9}  ${C_DIM}tree ${TREE:0:9}${C_OFF}"
 # --- push --------------------------------------------------------------------
 
 if ! git_h -C "$WT" push -q --force-with-lease="refs/heads/$B:" -- "$HOIST_REMOTE" "refs/heads/$B:refs/heads/$B" 2>"$TMP/push.err"; then
-	sed 's/^/  /' "$TMP/push.err" >&2
+	scrub_urls <"$TMP/push.err" | sed 's/^/  /' >&2
 	undo
 	die "push failed — the local commit was undone so hoist push can be re-run once the cause is fixed"
 fi
@@ -158,38 +164,10 @@ info "pushed    $B -> $HOIST_REMOTE"
 
 # --- pull request ------------------------------------------------------------
 
-# web_host_path <remote-url> — "host path" (no scheme, no userinfo, no port,
-# no .git), or nothing if the URL shape is not recognised.
-web_host_path() {
-	local u="$1" scheme rest hostport host path
-	case "$u" in
-	*://*)
-		scheme="${u%%://*}"
-		rest="${u#*://}"
-		hostport="${rest%%/*}"
-		path="${rest#*/}"
-		[ "$path" != "$rest" ] || path=""
-		hostport="${hostport##*@}"
-		host="${hostport%%:*}"
-		case "$scheme" in http | https | ssh | git) ;; *) return 0 ;; esac
-		;;
-	*@*:* | *:*)
-		# scp-like: [user@]host:path
-		case "$u" in /* | ./*) return 0 ;; esac
-		host="${u%%:*}"
-		host="${host##*@}"
-		path="${u#*:}"
-		;;
-	*) return 0 ;;
-	esac
-	path="${path%/}"
-	path="${path%.git}"
-	path="${path#/}"
-	[ -n "$host" ] && [ -n "$path" ] || return 0
-	printf '%s %s\n' "$host" "$path"
-}
-
-remote_url="$(git -C "$WT" remote get-url -- "$HOIST_REMOTE" 2>/dev/null || true)"
+# the URL as configured (get-url would expand insteadOf rewrites, hiding the
+# host the user actually thinks of this remote as)
+remote_url="$(git -C "$WT" config --get "remote.$HOIST_REMOTE.url" 2>/dev/null ||
+	git -C "$WT" remote get-url -- "$HOIST_REMOTE" 2>/dev/null || true)"
 hp="$(web_host_path "$remote_url")"
 host="${hp%% *}"
 path="${hp#* }"
