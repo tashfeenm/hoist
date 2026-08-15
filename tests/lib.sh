@@ -54,6 +54,7 @@ tmpdir() {
 }
 
 # fixture_new — build a fresh fixture; sets FIX, WORKSHOP, ORIGIN.
+# shellcheck disable=SC2034  # consumed by the sourcing test
 fixture_new() {
 	local parent
 	parent="$(tmpdir)"

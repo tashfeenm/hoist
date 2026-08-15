@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 fixture_new
-FILES="src/parser.sh src/report.sh src/legacy.sh t/run.sh scripts/pre-commit.sh"
+FILES="src/parser.sh src/report.sh src/legacy.sh t/run.sh scripts/pre-commit.sh bin/widget t/fixtures/keys.txt"
 SNAP="$(tmpdir)"
 repo_snapshot "$WORKSHOP" "$SNAP/before"
 
@@ -63,6 +63,9 @@ assert_eq "$(printf '%s\n' $FILES | sort)" "$(printf '%s\n' "$committed" | sort)
 	"committed paths are exactly the manifest"
 assert_eq "100755" "$(git -C "$ORIGIN" ls-tree "$tip" scripts/pre-commit.sh | cut -c1-6)" \
 	"exec bit survives"
+assert_eq "100755" "$(git -C "$ORIGIN" ls-tree "$tip" bin/widget | cut -c1-6)" \
+	"bin/widget carries upstream's mode"
+assert_no_file "$WORKSHOP/.git/hoist-fixture-hook-fired" "workshop post-checkout hook did not fire"
 
 hoist cleanup --state "$S"
 assert_status 0 $? "cleanup after push needs no --discard"
