@@ -21,7 +21,12 @@ Two rules that never bend:
 
 ## The flow
 
-`$SKILL` below is this skill's directory.
+The scripts sit in `scripts/` next to this file. Resolve that once at the start,
+since you will be running commands from the user's repo, not from here:
+
+```bash
+SKILL=/absolute/path/to/this/skill    # the directory containing SKILL.md
+```
 
 ### 1. Agree on the file list and the target
 
