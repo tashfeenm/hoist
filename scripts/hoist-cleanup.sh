@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
 #
-# hoist-cleanup.sh — remove the temporary worktree and its branch.
-#
-# Safe to run at any point. Your repo's working tree is never touched; this
-# only undoes what hoist-prepare.sh created.
+# hoist cleanup — remove the temporary worktree, its branch and the state
+# directory. Your repo's working tree and index are never touched; this only
+# undoes what hoist prepare created (the owned /.hoist/ line in
+# .git/info/exclude is left in place on purpose).
 #
 # Usage:
-#   hoist-cleanup.sh --state FILE [--keep-branch]
+#   hoist cleanup --state FILE [--discard] [--keep-branch]
 #
-set -euo pipefail
+#   --discard      also remove work that exists nowhere else: unstaged edits,
+#                  untracked files, or an unpushed commit in the worktree.
+#                  Without it, cleanup refuses and lists what it found.
+#   --keep-branch  keep the local branch (the worktree still goes)
+#
+# Cleanup validates the state file like every other command: it will not
+# remove anything outside <repo>/.hoist/<id>/, and it will not delete a
+# branch or worktree the state does not describe. Exit 0 ok, 1 refused
+# (work would be lost), 2 error.
+#
+set -Eeuo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/hoist-lib.sh
 . "$HERE/hoist-lib.sh"
 
-STATE="" KEEP=0
+usage() {
+	print_help "${BASH_SOURCE[0]}"
+	exit "${1:-0}"
+}
+
+STATE="" KEEP=0 DISCARD=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--state)
@@ -25,33 +40,127 @@ while [ $# -gt 0 ]; do
 		KEEP=1
 		shift
 		;;
-	-h | --help)
-		sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
-		exit 0
+	--discard)
+		DISCARD=1
+		shift
 		;;
+	-h | --help) usage 0 ;;
 	*) die "unknown argument: $1" ;;
 	esac
 done
-[ -n "$STATE" ] || die "--state is required"
-state_load "$STATE"
+[ -n "$STATE" ] || usage 2
 
-# Uncommitted work in the worktree is work Claude or the human did there —
-# say so rather than discarding it quietly.
-if [ -d "$HOIST_WORKTREE" ] && ! git -C "$HOIST_WORKTREE" diff --cached --quiet 2>/dev/null; then
-	warn "discarding staged-but-uncommitted changes in $HOIST_WORKTREE"
+state_load "$STATE" lenient
+lock_repo "$HOIST_REPO"
+lock_state
+trap 'unlock_state; unlock_repo' EXIT
+trap 'die "cleanup aborted — operational error (line $LINENO)"' ERR
+
+REPO="$HOIST_REPO" WT="$HOIST_WORKTREE" TMP="$HOIST_TMP" B="$HOIST_BRANCH"
+
+registered=0
+git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -qFx -- "worktree $WT" && registered=1
+present=0
+[ -d "$WT" ] && [ ! -L "$WT" ] && present=1
+
+# --- would anything unique be lost? ----------------------------------------
+
+# Unique work = an unpushed commit, staged state that never shipped, or an
+# unstaged edit to a MANIFEST path. Non-manifest leftovers (build artifacts,
+# a gate's scratch files) can never be committed by hoist; after a verified
+# push they are listed and removed, before one they block like everything
+# else — the hoist itself has not shipped yet.
+if [ "$present" -eq 1 ] && [ "$registered" -eq 1 ] && [ "$DISCARD" -eq 0 ]; then
+	lost="" extra="" pushed=0
+	head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)"
+	if [ -n "$head_sha" ] && [ "$head_sha" != "$HOIST_BASE_SHA" ]; then
+		if [ -f "$TMP/pushed" ] && [ "$(cat "$TMP/pushed")" = "$head_sha" ]; then
+			pushed=1
+		else
+			lost="$lost
+  an unpushed commit: ${head_sha:0:9}"
+		fi
+	fi
+	staged="$(git -C "$WT" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
+	[ "$staged" -eq 0 ] || lost="$lost
+  $staged staged file(s) — the hoisted state (with any edits made in the worktree), not pushed"
+	while IFS= read -r -d '' p; do
+		if in_manifest "$HOIST_MANIFEST" "$p"; then
+			lost="$lost
+  unstaged edit to a hoisted file: $p"
+		else
+			extra="$extra $p"
+		fi
+	done < <(git -C "$WT" diff --name-only -z 2>/dev/null)
+	while IFS= read -r -d '' p; do
+		if in_manifest "$HOIST_MANIFEST" "$p"; then
+			lost="$lost
+  untracked hoisted file: $p"
+		else
+			extra="$extra $p"
+		fi
+	done < <(git -C "$WT" ls-files --others --exclude-standard -z 2>/dev/null)
+	if [ -n "$extra" ] && [ "$pushed" -eq 0 ]; then
+		lost="$lost
+  non-manifest path(s) in the worktree:$extra"
+	fi
+	if [ -n "$lost" ]; then
+		warn "cleanup refused — the worktree holds work that exists nowhere else:$lost"
+		dim "  re-run with --discard to remove it anyway (the branch is $B; the worktree is $WT)"
+		exit 1
+	fi
+	[ -z "$extra" ] || dim "removing non-manifest leftovers (gate artifacts):$extra"
 fi
 
-git -C "$HOIST_REPO" worktree remove --force "$HOIST_WORKTREE" 2>/dev/null || true
-git -C "$HOIST_REPO" worktree prune
+# --- remove ----------------------------------------------------------------
 
+problems=""
+if [ "$registered" -eq 1 ] && [ "$present" -eq 1 ]; then
+	git_h -C "$REPO" worktree remove --force -- "$WT" 2>"$TMP/wt-remove.err" ||
+		problems="$problems
+  could not remove the worktree: $(tr '\n' ' ' <"$TMP/wt-remove.err")"
+elif [ "$registered" -eq 1 ]; then
+	problems="$problems
+  the worktree directory is already gone but git still lists it — run:  $(printf 'git -C %q worktree prune' "$REPO")  then hoist cleanup again"
+elif [ "$present" -eq 1 ]; then
+	# not registered (git already pruned it) but the directory is still here,
+	# inside our own state dir — remove it with the state dir below
+	:
+fi
+
+if [ -z "$problems" ] && [ "$KEEP" -eq 0 ]; then
+	if git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1; then
+		# -D, not -d: the branch is usually unmerged by design at this point.
+		git -C "$REPO" branch -D -- "$B" >/dev/null 2>"$TMP/branch.err" ||
+			problems="$problems
+  could not delete branch $B: $(tr '\n' ' ' <"$TMP/branch.err")"
+	else
+		dim "branch $B was already gone"
+	fi
+fi
+
+if [ -n "$problems" ]; then
+	warn "cleanup incomplete:$problems"
+	dim "  state kept at $STATE"
+	exit 2
+fi
+
+# The state directory is exactly <repo>/.hoist/<id> (validated by state_load).
+unlock_state
+rm -r -- "$TMP"
+rmdir -- "$REPO/.hoist" 2>/dev/null || true
+
+# --- verify -----------------------------------------------------------------
+
+! git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -qFx -- "worktree $WT" ||
+	die "worktree still registered after cleanup: $WT"
+[ ! -e "$WT" ] || die "worktree directory still present: $WT"
+[ ! -e "$TMP" ] || die "state directory still present: $TMP"
 if [ "$KEEP" -eq 0 ]; then
-	# -D, not -d: the branch is usually unmerged by design at this point.
-	git -C "$HOIST_REPO" branch -D "$HOIST_BRANCH" >/dev/null 2>&1 ||
-		dim "branch $HOIST_BRANCH was already gone"
+	! git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1 || die "branch still present: $B"
 fi
 
-rm -rf "$HOIST_TMP"
 info "cleaned up"
-dim "  removed worktree $HOIST_WORKTREE"
-[ "$KEEP" -eq 1 ] && dim "  kept branch $HOIST_BRANCH"
+dim "  removed worktree .hoist/$HOIST_ID/tree and its state"
+[ "$KEEP" -eq 0 ] || dim "  kept branch $B"
 exit 0

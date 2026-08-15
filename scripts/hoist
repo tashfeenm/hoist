@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# hoist — work dirty, ship clean.
+#
+# Lift the current STATE of named files out of a dirty repo onto a fresh
+# branch off <remote>/<target>, in a temporary worktree under <repo>/.hoist/,
+# scan them, show the full diff, and push only on a separate, explicit step.
+#
+# Usage:
+#   hoist prepare      --repo DIR --target BRANCH [opts] -- FILE...   → prints state path
+#   hoist scan         --state FILE [--run-gates | --gates CMD | --skip-gates] [--only CHECK]
+#   hoist acknowledge  --state FILE --finding ID [--finding ID...] --reason "..."
+#   hoist finish       --state FILE --title "..." [--body "..."]      (dry run + receipt)
+#   hoist push         --state FILE [--no-pr]
+#   hoist cleanup      --state FILE [--discard] [--keep-branch]
+#   hoist help [command]
+#   hoist version
+#
+# This dispatcher is the supported command line; the hoist-*.sh scripts next
+# to it are internal. Exit: 0 ok, 1 findings/refusal to review, 2 error.
+#
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+prepare | scan | acknowledge | finish | push | cleanup)
+	exec "$HERE/hoist-$cmd.sh" "$@"
+	;;
+version | --version | -V)
+	printf 'hoist 0.1.0\n'
+	exit 0
+	;;
+help | --help | -h)
+	sub="${1:-}"
+	case "$sub" in
+	prepare | scan | acknowledge | finish | push | cleanup)
+		exec "$HERE/hoist-$sub.sh" --help
+		;;
+	'')
+		awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}" >&2
+		exit 0
+		;;
+	*)
+		printf 'hoist: no such command: %s\n' "$sub" >&2
+		exit 2
+		;;
+	esac
+	;;
+*)
+	printf 'hoist: no such command: %s\n\n' "$cmd" >&2
+	awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}" >&2
+	exit 2
+	;;
+esac
