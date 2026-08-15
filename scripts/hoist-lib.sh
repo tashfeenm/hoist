@@ -397,7 +397,7 @@ state_load() {
 	[ "$HOIST_MANIFEST" = "$HOIST_TMP/manifest" ] || die "state manifest is not <tmp>/manifest: $HOIST_MANIFEST"
 	for v in "$HOIST_TMP" "$HOIST_WORKTREE"; do
 		case "$v" in
-		/ | "$HOME" | "$HOIST_REPO" | "$common" | "$common"/*) die "state points at a forbidden location: $v" ;;
+		/ | "${HOME:-/nonexistent}" | "$HOIST_REPO" | "$common" | "$common"/*) die "state points at a forbidden location: $v" ;;
 		esac
 	done
 	[ ! -L "$HOIST_REPO/.hoist" ] || die "<repo>/.hoist is a symlink — refusing"
@@ -412,7 +412,7 @@ state_load() {
 	[ -n "$lenient" ] && return 0
 
 	[ -d "$HOIST_WORKTREE" ] && [ ! -L "$HOIST_WORKTREE" ] || die "worktree missing: $HOIST_WORKTREE (run hoist cleanup)"
-	git -C "$HOIST_REPO" worktree list --porcelain 2>/dev/null | grep -qFx -- "worktree $HOIST_WORKTREE" ||
+	git -C "$HOIST_REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $HOIST_WORKTREE" >/dev/null ||
 		die "worktree is not registered with the repository: $HOIST_WORKTREE"
 	wt_common="$(git_common_dir "$HOIST_WORKTREE")" || die "cannot resolve the git directory of the worktree"
 	[ "$wt_common" = "$common" ] || die "worktree belongs to a different repository"

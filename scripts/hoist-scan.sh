@@ -242,7 +242,7 @@ scan_gates() {
 		MUTATED=1
 	fi
 	local extra
-	extra="$(git -C "$WT" status --porcelain --untracked=all -z 2>/dev/null | tr '\0' '\n' | awk 'NF' | while IFS= read -r l; do
+	extra="$(git -C "$WT" status --porcelain --no-renames --untracked=all -z 2>/dev/null | tr '\0' '\n' | awk 'NF' | while IFS= read -r l; do
 		p="${l#???}"
 		in_manifest "$HOIST_MANIFEST" "$p" || printf 'x\n'
 	done | wc -l | tr -d ' ')"
@@ -494,7 +494,7 @@ scan_drift() {
 		elif [ "$mb_mode" != "$tg_mode" ] && [ "$ix_mode" != "$tg_mode" ]; then
 			rule="mode" kind="mode changed upstream (${mb_mode}→${tg_mode}) but your copy is $ix_mode — chmod the copy in the worktree"
 			[ "${mb#* }" = "${tg#* }" ] || kind="$kind (content changed upstream too)"
-		elif git -C "$HOIST_REPO" diff --numstat "$HOIST_MERGE_BASE" "$HOIST_BASE_SHA" -- "$p" 2>/dev/null | grep -q "$(printf '^-\t-\t')"; then
+		elif git -C "$HOIST_REPO" diff --numstat "$HOIST_MERGE_BASE" "$HOIST_BASE_SHA" -- "$p" 2>/dev/null | grep "$(printf '^-\t-\t')" >/dev/null; then
 			rule="binary" kind="binary — changed upstream ($n commit(s)); resolve by hand"
 		elif [ "${mb#* }" = "${tg#* }" ]; then
 			# mode-only upstream change and our mode already matches → nothing to carry

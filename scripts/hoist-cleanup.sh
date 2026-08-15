@@ -62,7 +62,7 @@ trap 'die "cleanup aborted — operational error (line $LINENO)"' ERR
 REPO="$HOIST_REPO" WT="$HOIST_WORKTREE" TMP="$HOIST_TMP" B="$HOIST_BRANCH"
 
 registered=0
-git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -qFx -- "worktree $WT" && registered=1
+git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WT" >/dev/null && registered=1
 present=0
 [ -d "$WT" ] && [ ! -L "$WT" ] && present=1
 
@@ -155,7 +155,7 @@ rmdir -- "$REPO/.hoist" 2>/dev/null || true
 
 # --- verify -----------------------------------------------------------------
 
-! git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -qFx -- "worktree $WT" ||
+! git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WT" >/dev/null ||
 	die "worktree still registered after cleanup: $WT"
 [ ! -e "$WT" ] || die "worktree directory still present: $WT"
 [ ! -e "$TMP" ] || die "state directory still present: $TMP"

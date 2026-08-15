@@ -314,7 +314,7 @@ npaths=${#PATHS[@]}
 unchanged=$((npaths - added - modified - deleted - typechg))
 while IFS= read -r path; do
 	[ -n "$path" ] || continue
-	if ! staged_status "$WORKTREE" | tr '\0' '\n' | grep -qFx -- "$path"; then
+	if ! staged_status "$WORKTREE" | tr '\0' '\n' | grep -Fx -- "$path" >/dev/null; then
 		info "  ${C_DIM}unchanged $path — already identical on $TARGET${C_OFF}"
 	fi
 done <"$MANIFEST"
