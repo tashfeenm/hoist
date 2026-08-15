@@ -5,6 +5,11 @@
 A Claude Code skill that lifts the current state of specific files out of your
 dirty repo onto a clean branch, checks them, and opens a PR.
 
+![hoist promoting five files out of a dirty repo](demo.gif)
+
+*Recorded against the fixture in this repo — `vhs demo.tape` reproduces it, which
+also makes it a smoke test.*
+
 ---
 
 Your working repo is a mess, and that is fine. It has your CLAUDE.md tweaks,
