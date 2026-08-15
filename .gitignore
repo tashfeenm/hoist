@@ -1,0 +1,32 @@
+
+# Generated fixture repo (rebuild with fixtures/make-fixture.sh)
+.fixture/
+
+# Latch state files
+.ai/review_feedback.json
+.ai/state.json
+.ai/CONTEXT.md
+.ai/MINDMAP.md
+.ai/WORKING.md
+.ai/_cache/
+.ai/transcripts/
+.ai/inbox-log.md
+
+# Latch review artifacts
+review_raw.json
+review_summary.md
+gates_report.json
+
+# Claude Code
+.claude/settings.local.json
+
+# Test/lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+
+# Secrets — never commit (latch CI uses GitHub Actions secrets, not .env)
+.env
+.env.*
+!.env.example
