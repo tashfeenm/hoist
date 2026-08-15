@@ -437,10 +437,14 @@ scan_personal() {
 
 # tree_entry <rev> <path> — "mode type sha" of a path in a commit's tree, or "".
 tree_entry() {
-	local out rc=0
-	out="$(GIT_LITERAL_PATHSPECS=1 git -C "$HOIST_REPO" ls-tree -z "$1" -- "$2" 2>/dev/null)" || rc=$?
-	[ "$rc" -eq 0 ] || die "git ls-tree failed for $2 at ${1:0:9}"
-	printf '%s' "$out" | tr '\0' '\n' | awk -F'\t' -v p="$2" '$2==p {split($1,m," "); print m[1] " " m[2] " " m[3]; exit}'
+	local f="$TMP/.lstree.$$" rc=0
+	GIT_LITERAL_PATHSPECS=1 git -C "$HOIST_REPO" ls-tree -z "$1" -- "$2" >"$f" 2>/dev/null || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		rm -f -- "$f"
+		die "git ls-tree failed for $2 at ${1:0:9}"
+	fi
+	tr '\0' '\n' <"$f" | awk -F'\t' -v p="$2" '$2==p {split($1,m," "); print m[1] " " m[2] " " m[3]; exit}'
+	rm -f -- "$f"
 }
 # index_entry <path> — "mode sha" from the worktree index, or "".
 index_entry() {

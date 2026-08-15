@@ -22,6 +22,7 @@ hoist prepare --repo "$WORKSHOP" --target main -- $FILES
 S="$(state_path)"
 TMP="$(state_get "$S" HOIST_TMP)"
 hoist scan --state "$S" --only drift
+assert_not_grep 'warning:' "$HOIST_ERR" "no shell warnings in the scan output (NUL bytes never pass through \$(...))"
 assert_grep 'src/parser\.sh .*also changed on main' "$HOIST_ERR" "text drift on parser.sh"
 assert_grep 'bin/widget .*mode changed upstream \(100644→100755\)' "$HOIST_ERR" "mode-only drift on bin/widget"
 assert_not_grep 't/fixtures/keys\.txt' "$HOIST_ERR" "no drift on a file upstream did not touch"
