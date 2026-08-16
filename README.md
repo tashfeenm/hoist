@@ -188,6 +188,15 @@ acknowledgement, long bodies). Not covered, by design: a real race between the
 final target check and the push (see below), and anything a deliberately
 malicious same-user process does to the state directory.
 
+**Forward eval.** Every pull request in this repository is opened with hoist.
+[`docs/eval-transcript.md`](docs/eval-transcript.md) is the session
+transcript of the first one, rendered straight from the session log (two path
+substitutions, disclosed in its header) — prepare, gates-first scan, the raw diff read hunk
+by hunk, the dry run, the stop, the human's yes in a later turn, the push, CI on
+both operating systems, the merge and the cleanup — including what the tooling
+refused along the way and the caveats about how faithfully it exercised the
+skill.
+
 ## Honest edge cases
 
 - **Mixed-hunk files are the genuinely painful case.** hoist does not do hunk
