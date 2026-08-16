@@ -127,6 +127,23 @@ assert_status 0 $? "push to an unknown host"
 assert_grep "open the PR in your host's UI" "$HOIST_ERR" "generic instruction for unknown hosts"
 hoist cleanup --state "$S" >/dev/null 2>&1
 git -C "$WORKSHOP" config --unset url."$ORIGIN".insteadOf
+
+# a credential carried in the URL's query string: never in the output, never
+# in the compare link (reachable, via the rewrite) — and never in the error
+# either (unreachable)
+git -C "$WORKSHOP" remote set-url origin 'https://github.com/acme/widget.git?token=QUERY-TOKEN-MUST-NOT-LEAK'
+git -C "$WORKSHOP" config url."$ORIGIN".insteadOf 'https://github.com/acme/widget.git?token=QUERY-TOKEN-MUST-NOT-LEAK'
+ready_state
+PATH="$SHIM:$BARE_PATH" hoist push --state "$S"
+assert_status 0 $? "push to a query-authenticated remote (rewritten to the local origin)"
+assert_grep "https://github.com/acme/widget/compare/main\.\.\.$BRANCH" "$HOIST_ERR" "the compare link is derived without the query string"
+assert_not_grep 'QUERY-TOKEN-MUST-NOT-LEAK' "$HOIST_ERR" "  …and the token appears nowhere in the output"
+hoist cleanup --state "$S" >/dev/null 2>&1
+git -C "$WORKSHOP" config --unset url."$ORIGIN".insteadOf
+git -C "$WORKSHOP" remote set-url origin 'https://github.invalid/o/r.git?token=QUERY-TOKEN-MUST-NOT-LEAK'
+hoist prepare --repo "$WORKSHOP" --target main -- src/parser.sh
+assert_status 2 $? "fetching an unreachable query-authenticated remote fails"
+assert_not_grep 'QUERY-TOKEN-MUST-NOT-LEAK' "$HOIST_ERR" "  …without the token in prepare's output"
 git -C "$WORKSHOP" remote set-url origin "$ORIGIN"
 
 # --- (8) target branch gone from the remote ---------------------------------

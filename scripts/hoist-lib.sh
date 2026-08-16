@@ -311,7 +311,7 @@ kv_get_all() {
 # not a defence against a same-user adversary, who could edit the repo
 # directly anyway.
 
-HOIST_STATE_KEYS="HOIST_VERSION HOIST_ID HOIST_REPO HOIST_WORKTREE HOIST_TMP HOIST_MANIFEST HOIST_MANIFEST_DIGEST HOIST_BRANCH HOIST_TARGET HOIST_REMOTE HOIST_REMOTE_URL HOIST_PUSH_URL HOIST_BASE_SHA HOIST_MERGE_BASE HOIST_FETCHED HOIST_UNRELATED"
+HOIST_STATE_KEYS="HOIST_VERSION HOIST_ID HOIST_REPO HOIST_WORKTREE HOIST_TMP HOIST_MANIFEST HOIST_MANIFEST_DIGEST HOIST_BRANCH HOIST_TARGET HOIST_REMOTE HOIST_REMOTE_URL HOIST_PUSH_URL HOIST_FETCH_EFFECTIVE HOIST_PUSH_EFFECTIVE HOIST_BASE_SHA HOIST_MERGE_BASE HOIST_FETCHED HOIST_UNRELATED"
 
 # state_write <file> — write the state from the HOIST_* variables currently
 # set. Files 0600, written whole then moved into place.
@@ -358,7 +358,15 @@ state_load() {
 	for k in $HOIST_STATE_KEYS; do
 		case " $seen " in
 		*" $k "*) ;;
-		*) die "state file is missing key: $k" ;;
+		*)
+			# the effective-endpoint keys arrived after the first states were
+			# written; an older state still parses (so cleanup can remove it)
+			# and is refused below for everything but cleanup
+			case "$k" in
+			HOIST_FETCH_EFFECTIVE | HOIST_PUSH_EFFECTIVE) eval "$k=" ;;
+			*) die "state file is missing key: $k" ;;
+			esac
+			;;
 		esac
 	done
 
@@ -382,8 +390,12 @@ state_load() {
 	*[!0-9a-f]*) die "state has a malformed manifest digest" ;;
 	esac
 	[ "${#HOIST_MANIFEST_DIGEST}" -eq "${#HOIST_BASE_SHA}" ] || die "state has a malformed manifest digest"
-	! has_control "$HOIST_REMOTE_URL$HOIST_PUSH_URL" || die "state has control characters in remote URLs"
+	! has_control "$HOIST_REMOTE_URL$HOIST_PUSH_URL$HOIST_FETCH_EFFECTIVE$HOIST_PUSH_EFFECTIVE" || die "state has control characters in remote URLs"
 	[ -n "$HOIST_REMOTE_URL" ] || die "state has no remote URL"
+	if [ -z "$lenient" ]; then
+		[ -n "$HOIST_FETCH_EFFECTIVE" ] && [ -n "$HOIST_PUSH_EFFECTIVE" ] ||
+			die "state has no effective remote endpoints (written by an older hoist?) — hoist cleanup --discard, then prepare again"
+	fi
 	case "$HOIST_FETCHED$HOIST_UNRELATED" in 00 | 01 | 10 | 11) ;; *) die "state has malformed flags" ;; esac
 	[ -n "$HOIST_BRANCH" ] && [ -n "$HOIST_TARGET" ] && [ -n "$HOIST_REMOTE" ] || die "state has an empty branch/target/remote"
 	! has_control "$HOIST_BRANCH$HOIST_TARGET$HOIST_REMOTE" || die "state has control characters in branch/target/remote"
@@ -487,7 +499,10 @@ restage() {
 }
 
 # staged_tree <worktree> — tree hash of the current index.
-staged_tree() { git -C "$1" write-tree || die "could not write the staged tree"; }
+# write-tree also updates the index's cache-tree, i.e. writes the index — so
+# it too runs with hooks off (post-index-change would fire otherwise; t-08
+# pins it)
+staged_tree() { git_h -C "$1" write-tree || die "could not write the staged tree"; }
 
 # staged_status <worktree> — NUL-delimited "X\0path\0" pairs, index vs HEAD,
 # no rename detection (so status is only A/M/D/T).
@@ -609,10 +624,11 @@ text_looks_sensitive() {
 # --- remote URLs -----------------------------------------------------------
 
 # scrub_urls — strip userinfo (user:token@) out of URLs in text hoist echoes
-# from git, so an authenticated remote never leaks a token into a terminal
-# or a session log. Covers scheme URLs; scp-style "user@host:" carries no
-# password, and credentials in query strings are covered by redact_secrets.
-scrub_urls() { sed -E 's#(://)[^/@[:space:]]*@#\1#g'; }
+# from git, then run redact_secrets over it, so an authenticated remote never
+# leaks a token into a terminal or a session log — whether the credential sits
+# in the userinfo or in a ?token= query. scp-style "user@host:" carries no
+# password. Every place git's stderr is shown goes through this.
+scrub_urls() { sed -E 's#(://)[^/@[:space:]]*@#\1#g' | redact_secrets; }
 
 # redact_secrets — replace credential-shaped spans (the same shapes the
 # fallback scanner knows, plus token=/password= query values) with
@@ -631,6 +647,10 @@ redact_secrets() {
 # and '/', for branch names in compare/MR links.
 url_encode() {
 	local s="$1" i c out=""
+	# bytewise: under a UTF-8 locale ${s:i:1} would yield whole characters and
+	# "'$c" their code point (é → %E9); percent-encoding is defined on bytes
+	# (é → %C3%A9), and git accepts such branch names
+	local LC_ALL=C
 	i=0
 	while [ "$i" -lt "${#s}" ]; do
 		c="${s:$i:1}"
@@ -667,6 +687,13 @@ web_host_path() {
 		;;
 	*) return 0 ;;
 	esac
+	# a ?query or #fragment is never part of the repository path — and it is
+	# where a credential-bearing remote keeps its token, so it must not reach
+	# the compare/MR link hoist prints
+	path="${path%%\?*}"
+	path="${path%%#*}"
+	host="${host%%\?*}"
+	host="${host%%#*}"
 	path="${path%/}"
 	path="${path%.git}"
 	path="${path#/}"

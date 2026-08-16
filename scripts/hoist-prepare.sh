@@ -102,6 +102,18 @@ n_push="$(git -C "$REPO" config --get-all "remote.$REMOTE.pushurl" 2>/dev/null |
 [ "${n_push:-0}" -le 1 ] || die "remote $REMOTE has several push URLs — hoist refuses to push to more than one destination"
 PUSH_URL="$(git -C "$REPO" config --get "remote.$REMOTE.pushurl" 2>/dev/null || true)"
 ! has_control "$REMOTE_URL$PUSH_URL" || die "remote URL contains control characters"
+# The stored values are not the whole story: git pushes to EVERY
+# remote.<name>.url when there is no pushurl, and url.<base>.insteadOf /
+# pushInsteadOf rewrite the destination without touching either stored value.
+# So the EFFECTIVE endpoints (rewrites applied, every value listed) are bound
+# too, exactly one of each, and push recomputes and compares them.
+FETCH_EFFECTIVE="$(git -C "$REPO" remote get-url --all -- "$REMOTE" 2>/dev/null || true)"
+n_eff="$(printf '%s\n' "$FETCH_EFFECTIVE" | grep -c . || true)"
+[ "${n_eff:-0}" -eq 1 ] || die "remote $REMOTE resolves to ${n_eff:-0} fetch URLs — hoist binds exactly one destination"
+PUSH_EFFECTIVE="$(git -C "$REPO" remote get-url --push --all -- "$REMOTE" 2>/dev/null || true)"
+n_eff="$(printf '%s\n' "$PUSH_EFFECTIVE" | grep -c . || true)"
+[ "${n_eff:-0}" -eq 1 ] || die "remote $REMOTE resolves to ${n_eff:-0} push URLs — hoist binds exactly one destination"
+! has_control "$FETCH_EFFECTIVE$PUSH_EFFECTIVE" || die "remote URL contains control characters"
 git check-ref-format --branch "$TARGET" >/dev/null 2>&1 || die "not a valid branch name: $TARGET"
 ! has_control "$TARGET$REMOTE" || die "target/remote contain control characters"
 
@@ -305,6 +317,8 @@ HOIST_TARGET="$TARGET"
 HOIST_REMOTE="$REMOTE"
 HOIST_REMOTE_URL="$REMOTE_URL"
 HOIST_PUSH_URL="$PUSH_URL"
+HOIST_FETCH_EFFECTIVE="$FETCH_EFFECTIVE"
+HOIST_PUSH_EFFECTIVE="$PUSH_EFFECTIVE"
 HOIST_BASE_SHA="$BASE_SHA"
 HOIST_MERGE_BASE="$MERGE_BASE"
 HOIST_FETCHED="$FETCH"

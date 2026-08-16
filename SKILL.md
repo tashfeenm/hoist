@@ -237,7 +237,10 @@ instruction. Say what happened.
 The user's working tree and index were never modified. (Fetching, the new
 branch and the temporary worktree do touch the repository's `.git` metadata;
 cleanup removes what hoist added, except the owned `/.hoist/` line in
-`.git/info/exclude`, which is left in place.)
+`.git/info/exclude`, which is left in place.) If the worktree directory itself
+has already vanished, cleanup keeps the branch — nothing left proves it is
+hoist's rather than one named by an edited state file — and prints the exact
+`git branch -D` for the user to run.
 
 **Concurrency.** Two hoists in one repo at once are unsupported; the lock
 refuses rather than corrupts. Finish one first.
