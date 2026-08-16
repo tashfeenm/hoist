@@ -1,5 +1,7 @@
 # hoist
 
+[![tests](https://github.com/tashfeenm/hoist/actions/workflows/tests.yml/badge.svg)](https://github.com/tashfeenm/hoist/actions/workflows/tests.yml)
+
 **Work dirty. Ship clean.**
 
 A Claude Code skill that lifts the current state of specific files out of your
@@ -57,7 +59,7 @@ the repository's own code and are not sandboxed by hoist.
 ## Install
 
 ```bash
-git clone https://github.com/tashfeen/hoist ~/.claude/skills/hoist
+git clone https://github.com/tashfeenm/hoist ~/.claude/skills/hoist
 ```
 
 That is the install. Then, in any repo:
@@ -168,7 +170,10 @@ claims a clean sweep.
 `tests/run.sh` runs the regression suite (`tests/t-*.sh`, eleven files, ~420
 assertions); `tests/run.sh --bash /bin/bash` runs it under macOS's bash 3.2;
 `HOIST_TEST_STRICT=1` turns the two environment-dependent skips (no gitleaks,
-no submodule support) into failures for CI. Every test builds its own fixture
+no submodule support) into failures for CI. That is exactly what
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs on every
+push and pull request: Linux with bash 5, and macOS with both `/bin/bash` 3.2
+and Homebrew bash 5, gitleaks pinned by checksum. Every test builds its own fixture
 under `mktemp` and drives the real scripts. Suites: state containment (forged,
 symlinked, malformed, edited target/branch, values with `=`); manifest-only
 index and untouched workshop; filenames and index edge cases; the drift matrix;

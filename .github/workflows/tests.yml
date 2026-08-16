@@ -1,0 +1,76 @@
+# hoist regression suite — the same `tests/run.sh` the README describes,
+# run publicly on Linux (bash 5) and macOS (/bin/bash 3.2 AND Homebrew bash 5),
+# with HOIST_TEST_STRICT=1 so the environment-dependent skips (no gitleaks,
+# no submodule support) count as failures here.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.0
+
+jobs:
+  suite:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux (bash 5)
+          - os: macos-latest
+            name: macos (bash 3.2 + bash 5)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install gitleaks (pinned, checksum-verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux) asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+                   sum="79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e" ;;
+            macOS) asset="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz"
+                   sum="b251ab2bcd4cd8ba9e56ff37698c033ebf38582b477d21ebd86586d927cf87e7" ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${asset}"
+          echo "$sum  $RUNNER_TEMP/$asset" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/gitleaks" version
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          git --version
+          bash --version | head -1
+          if [ "$RUNNER_OS" = macOS ]; then
+            /bin/bash --version | head -1
+            brew list bash >/dev/null 2>&1 || brew install bash
+            "$(brew --prefix)/bin/bash" --version | head -1
+          fi
+
+      - name: Suite — bash 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            HOIST_TEST_STRICT=1 tests/run.sh --bash "$(brew --prefix)/bin/bash"
+          else
+            HOIST_TEST_STRICT=1 tests/run.sh
+          fi
+
+      - name: Suite — macOS /bin/bash 3.2
+        if: runner.os == 'macOS'
+        shell: bash
+        run: HOIST_TEST_STRICT=1 tests/run.sh --bash /bin/bash

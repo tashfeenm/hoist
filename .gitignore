@@ -11,7 +11,8 @@
 # ---------------------------------------------------------------------------
 .ai/
 .claude/
-.github/
+.github/workflows/latch.yml
+.github/dependabot.yml
 tasks/
 CLAUDE.md
 CLAUDE.local.md
