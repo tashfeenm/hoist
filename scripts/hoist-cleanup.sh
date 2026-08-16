@@ -101,7 +101,7 @@ if [ "$present" -eq 1 ] && [ "$registered" -eq 1 ] && [ "$DISCARD" -eq 0 ]; then
   an unpushed commit: ${head_sha:0:9}"
 		fi
 	fi
-	staged="$(git -C "$WT" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
+	staged="$(git_h -C "$WT" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
 	[ "$staged" -eq 0 ] || lost="$lost
   $staged staged file(s) — the hoisted state (with any edits made in the worktree), not pushed"
 	while IFS= read -r -d '' p; do
@@ -111,7 +111,7 @@ if [ "$present" -eq 1 ] && [ "$registered" -eq 1 ] && [ "$DISCARD" -eq 0 ]; then
 		else
 			extra="$extra $p"
 		fi
-	done < <(git -C "$WT" diff --name-only -z 2>/dev/null)
+	done < <(git_h -C "$WT" diff --name-only -z 2>/dev/null)
 	while IFS= read -r -d '' p; do
 		if in_manifest "$HOIST_MANIFEST" "$p"; then
 			lost="$lost
@@ -119,7 +119,7 @@ if [ "$present" -eq 1 ] && [ "$registered" -eq 1 ] && [ "$DISCARD" -eq 0 ]; then
 		else
 			extra="$extra $p"
 		fi
-	done < <(git -C "$WT" ls-files --others --exclude-standard -z 2>/dev/null)
+	done < <(git_h -C "$WT" ls-files --others --exclude-standard -z 2>/dev/null)
 	if [ -n "$extra" ] && [ "$pushed" -eq 0 ]; then
 		lost="$lost
   non-manifest path(s) in the worktree:$extra"
@@ -135,13 +135,13 @@ fi
 # --- remove ----------------------------------------------------------------
 
 problems=""
-wt_branch_ok=1
+# The branch is deleted only when the LIVE worktree proves it is hoist's: a
+# registered, present worktree with refs/heads/$B checked out. Fail closed
+# otherwise — an edited HOIST_BRANCH plus a vanished worktree must never turn
+# --discard into the deletion of an unrelated local branch.
+wt_branch_ok=0
 if [ "$registered" -eq 1 ] && [ "$present" -eq 1 ]; then
-	[ "$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)" = "refs/heads/$B" ] || wt_branch_ok=0
-elif [ "$registered" -eq 0 ] && [ "$present" -eq 0 ]; then
-	# nothing left to prove the branch is ours; delete only if the state
-	# says so AND the branch exists — same as before, but say so
-	:
+	[ "$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)" = "refs/heads/$B" ] && wt_branch_ok=1
 fi
 if [ "$registered" -eq 1 ] && [ "$present" -eq 1 ]; then
 	git_h -C "$REPO" worktree remove --force -- "$WT" 2>"$TMP/wt-remove.err" ||
@@ -159,7 +159,7 @@ fi
 if [ -z "$problems" ] && [ "$KEEP" -eq 0 ]; then
 	# only the branch the worktree actually had checked out is ours to delete
 	if [ "$wt_branch_ok" -eq 0 ]; then
-		dim "branch $B kept — the worktree was not on it, so it is not provably hoist's"
+		dim "branch $B kept — no live worktree proves it is hoist's (delete it yourself if it is: $(printf 'git branch -D %q' "$B"))"
 	elif git -C "$REPO" rev-parse --verify -q "refs/heads/$B" >/dev/null 2>&1; then
 		# -D, not -d: the branch is usually unmerged by design at this point.
 		git_h -C "$REPO" branch -D -- "$B" >/dev/null 2>"$TMP/branch.err" ||

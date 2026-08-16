@@ -136,10 +136,10 @@ info "  branch  $HOIST_BRANCH"
 info "  onto    $HOIST_REMOTE/$HOIST_TARGET @ ${HOIST_BASE_SHA:0:9}"
 info "  tree    ${TREE:0:9}"
 info ""
-git -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv --stat --summary HEAD >&2 || die "could not diff"
+git_h -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv --stat --summary HEAD >&2 || die "could not diff"
 info ""
 info "${C_BOLD}full diff — this is exactly what would land${C_OFF}  ${C_DIM}(raw blobs: no textconv, no external diff)${C_OFF}"
-git -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv HEAD >&2 || die "could not diff"
+git_h -C "$WT" diff --cached --no-renames --no-ext-diff --no-textconv HEAD >&2 || die "could not diff"
 info ""
 
 # --- attestation summary --------------------------------------------------

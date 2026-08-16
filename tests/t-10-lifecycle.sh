@@ -150,7 +150,11 @@ git -C "$WORKSHOP" worktree prune
 hoist cleanup --state "$S" --discard
 assert_status 0 $? "cleanup completes after the prune"
 assert_no_file "$TMP" "state dir gone"
-assert_false "branch gone" git -C "$WORKSHOP" rev-parse --verify -q "refs/heads/$B"
+# with the worktree gone nothing proves the branch is hoist's (the state file
+# could name any branch), so it is KEPT and the delete command is printed
+assert_true "branch kept — no live worktree proves it is hoist's" git -C "$WORKSHOP" show-ref --verify -q "refs/heads/$B"
+assert_grep "kept.*git branch -D $B" "$HOIST_ERR" "  …with the exact delete command"
+git -C "$WORKSHOP" branch -D "$B" >/dev/null
 
 # --- (7) prepare refuses a branch that already exists ------------------------
 git -C "$WORKSHOP" branch taken

@@ -2,8 +2,9 @@
 
 This is the transcript of the Claude Code session in which hoist was used, for
 the first time against a real remote, to open [PR #1 of this repository](https://github.com/tashfeenm/hoist/pull/1)
-— the change that added the public CI workflow. It is rendered directly from
-the session's JSONL log; nothing in it was written after the fact.
+— the change that added the public CI workflow. The transcript body below is
+rendered directly from the session's JSONL log; this header is a retrospective
+summary written afterwards.
 
 **What happened, in order.** The working tree was dirty with three files
 (`.gitignore`, `README.md`, a new `.github/workflows/tests.yml`). `hoist
@@ -36,10 +37,18 @@ monitor events are shown as one-line notes.
   (`scripts/hoist prepare|scan|finish|push|cleanup`). The protocol and the
   scripts are identical; the `allowed-tools` permission prompts a slash-command
   invocation would produce were not part of this run.
-- The gates command was proposed by Claude three times without objection and
-  the human said "proceed"; Claude states that assumption explicitly in the
-  transcript before running the scan. A stricter reading of the skill's gates
-  policy would have waited for an explicit approval of the exact string.
+- The gates command was proposed by Claude three times, in earlier turns that
+  fall before this excerpt, without objection, and the human said "proceed";
+  Claude then stated that assumption explicitly at the start of the run, just
+  before `hoist prepare`. **That statement is not in the body below:** the
+  session log did not persist two short assistant text blocks in this window
+  (the tool calls were written; the prose preceding them was not — the
+  assumption statement, and a one-line "prepared … now the scan" note). The
+  body therefore begins with the `prepare` call and the renderer's own
+  description "with the approved gates command"; the account of the assumption
+  here rests on the author's record of the turn, not on the log. A stricter
+  reading of the skill's gates policy would have waited for an explicit
+  approval of the exact string.
 - Two substitutions were applied throughout: the absolute path of the
   repository checkout is shown as `<repo>`, and the session's scratch directory
   as `<scratch>` — both contained the maintainer's home directory, which is

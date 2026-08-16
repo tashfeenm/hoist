@@ -44,10 +44,23 @@ if [ -n "$BASH_BIN" ]; then
 		echo "not executable: $BASH_BIN" >&2
 		exit 2
 	}
-	SHIM="$(mktemp -d "${TMPDIR:-/tmp}/hoist-bash-shim.XXXXXX")"
-	ln -s "$BASH_BIN" "$SHIM/bash"
-	export PATH="$SHIM:$PATH"
+	# every step checked: a half-built shim would run the tests under the
+	# requested bash while the scripts' shebangs resolve a different one —
+	# exactly the distinction --bash exists to test
+	SHIM="$(mktemp -d "${TMPDIR:-/tmp}/hoist-bash-shim.XXXXXX")" && [ -d "$SHIM" ] || {
+		echo "could not create the bash shim directory (mktemp failed)" >&2
+		exit 2
+	}
 	trap 'rm -rf "$SHIM"' EXIT
+	ln -s "$BASH_BIN" "$SHIM/bash" || {
+		echo "could not create the bash shim in $SHIM" >&2
+		exit 2
+	}
+	export PATH="$SHIM:$PATH"
+	[ "$(command -v bash)" = "$SHIM/bash" ] && "$SHIM/bash" -c 'exit 0' || {
+		echo "the bash shim does not resolve first on PATH ($(command -v bash))" >&2
+		exit 2
+	}
 else
 	BASH_BIN="$(command -v bash)"
 fi

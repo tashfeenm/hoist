@@ -37,14 +37,16 @@ It branches off `origin/main` in a temporary worktree, copies in the current
 you the full diff, and pushes only when you say so.
 
 **What the scripts enforce, mechanically:** scan → full diff → receipt →
-push, all bound to one tree hash, one remote (URLs bound at prepare), one
-target and one branch. The scan writes an attestation only when all four checks
-ran on the final tree and nothing else moved (files, refs, git config, the
-frozen manifest); the dry run writes a receipt bound to that attestation, the
-acknowledgements and the exact commit message; `push` is a separate command
-that refuses unless all of that still binds the tree that is staged *right
-now*, every finding is acknowledged by ID, the remote's URLs are the ones bound
-at prepare, and the target has not moved.
+push, all bound to one tree hash, one remote (its stored URLs *and* its
+effective fetch and push endpoints — every `url` value, `insteadOf` and
+`pushInsteadOf` applied — bound at prepare, exactly one of each, re-derived at
+push), one target and one branch. The scan writes an attestation only when all
+four checks ran on the final tree and nothing else moved (the hoisted files,
+refs, git config, the frozen manifest); the dry run writes a receipt bound to
+that attestation, the acknowledgements and the exact commit message; `push` is
+a separate command that refuses unless all of that still binds the tree that is
+staged *right now*, every finding is acknowledged by ID, the remote's stored
+and effective URLs are the ones bound at prepare, and the target has not moved.
 
 **What the skill enforces, by protocol:** your yes is a *later* message, for
 the tree you saw. That is a rule in `SKILL.md` backed by Claude Code's
@@ -167,10 +169,11 @@ claims a clean sweep.
 
 ## Tests
 
-`tests/run.sh` runs the regression suite (`tests/t-*.sh`, eleven files, ~420
+`tests/run.sh` runs the regression suite (`tests/t-*.sh`, eleven files, ~520
 assertions); `tests/run.sh --bash /bin/bash` runs it under macOS's bash 3.2;
-`HOIST_TEST_STRICT=1` turns the two environment-dependent skips (no gitleaks,
-no submodule support) into failures for CI. That is exactly what
+`HOIST_TEST_STRICT=1` turns the environment-dependent skips (no gitleaks, no
+submodule support, git older than 2.28 for the `reference-transaction` hook)
+into failures for CI. That is exactly what
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs on every
 push and pull request: Linux with bash 5, and macOS with both `/bin/bash` 3.2
 and Homebrew bash 5, gitleaks pinned by checksum. Every test builds its own fixture
@@ -249,12 +252,16 @@ skill.
   repo at once are refused by a lock rather than corrupting anything. cleanup
   refuses to delete unpushed or unshipped work, or a worktree git no longer
   lists, without `--discard`; ignored files (build outputs) are treated as
-  disposable; a branch the worktree was not on is never deleted.
+  disposable; the branch is deleted only when the live worktree is on it — if
+  the worktree has vanished, nothing proves the branch is hoist's rather than
+  one named by an edited state file, so it is kept and the `git branch -D` is
+  printed for you.
 - **Gates can do anything the repo's code can**, including reach the network
   or your main checkout, before your yes. hoist prints the command and never
-  runs an autodetected one silently, watches files, refs, config and the
-  manifest across the run, and refuses to attest if any moved — but that is
-  detection after the fact, not a sandbox.
+  runs an autodetected one silently, watches the hoisted files, refs, config
+  and the manifest across the run, and refuses to attest if any of those moved
+  (other files a gate touches in the worktree are its own business and are
+  never committed) — but that is detection after the fact, not a sandbox.
 - **`.hoist/`.** The worktree lives at `<repo>/.hoist/<id>/tree`, ignored via
   one owned `/.hoist/` line in `.git/info/exclude` that hoist writes once and
   leaves in place. Don't `git clean -ffdx` while a hoist is active (it would

@@ -108,6 +108,14 @@ n_push="$(git -C "$HOIST_REPO" config --get-all "remote.$HOIST_REMOTE.pushurl" 2
 [ "${n_push:-0}" -le 1 ] || die "remote $HOIST_REMOTE now has several push URLs — refusing"
 cur_push="$(git -C "$HOIST_REPO" config --get "remote.$HOIST_REMOTE.pushurl" 2>/dev/null || true)"
 [ "$cur_push" = "$HOIST_PUSH_URL" ] || die "the push URL of remote $HOIST_REMOTE changed since prepare — refusing (hoist cleanup --discard, then prepare again)"
+# The EFFECTIVE endpoints — every configured URL, url.*.insteadOf and
+# pushInsteadOf applied — must be the single ones prepare bound. A second
+# remote.<name>.url (git would push to both) or a rewrite added since then
+# shows up here even though the stored values above are unchanged.
+cur_eff="$(git -C "$HOIST_REPO" remote get-url --all -- "$HOIST_REMOTE" 2>/dev/null || true)"
+[ "$cur_eff" = "$HOIST_FETCH_EFFECTIVE" ] || die "the effective fetch URL of remote $HOIST_REMOTE changed since prepare (a URL was added or a url.*.insteadOf rewrite changed) — refusing (hoist cleanup --discard, then prepare again)"
+cur_eff="$(git -C "$HOIST_REPO" remote get-url --push --all -- "$HOIST_REMOTE" 2>/dev/null || true)"
+[ "$cur_eff" = "$HOIST_PUSH_EFFECTIVE" ] || die "the effective push URL of remote $HOIST_REMOTE changed since prepare (a URL was added or a url.*.pushInsteadOf rewrite changed) — refusing (hoist cleanup --discard, then prepare again)"
 
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HOIST_BASE_SHA" ] ||
 	die "the worktree's HEAD is not the base commit — run hoist cleanup --discard and prepare again"

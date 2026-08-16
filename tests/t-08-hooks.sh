@@ -11,6 +11,15 @@ FILES="src/parser.sh src/report.sh src/legacy.sh t/run.sh scripts/pre-commit.sh 
 git -C "$WORKSHOP" -c user.email=x@example.invalid -c user.name=x commit -q --allow-empty -m probe 2>/dev/null
 assert_ne 0 $? "sanity: the workshop's pre-commit hook refuses a direct commit"
 assert_no_file "$WORKSHOP/.git/hoist-fixture-hook-fired" "sanity: no checkout marker yet"
+# post-index-change fires on every index write (add, restage, worktree add);
+# hoist writes the worktree index many times, so this pins the hooks-off claim
+# on the one hook the fixture does not plant
+printf '#!/bin/sh\ntouch "$(git rev-parse --git-common-dir)/hoist-pic-fired"\n' >"$WORKSHOP/.git/hooks/post-index-change"
+chmod +x "$WORKSHOP/.git/hooks/post-index-change"
+git -C "$WORKSHOP" add -A >/dev/null 2>&1
+git -C "$WORKSHOP" reset -q >/dev/null 2>&1
+assert_file "$WORKSHOP/.git/hoist-pic-fired" "sanity: post-index-change hook is live for the workshop's own index writes"
+rm -f "$WORKSHOP/.git/hoist-pic-fired"
 
 # … but never for hoist's commands: prepare (worktree add / checkout), push (commit, push)
 # shellcheck disable=SC2086
@@ -29,8 +38,11 @@ assert_status 0 $? "push succeeds although pre-commit and pre-push hooks would r
 assert_true "branch reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
 assert_not_grep 'workshop .* hook fired' "$HOIST_ERR" "no hook output anywhere"
 assert_no_file "$WORKSHOP/.git/hoist-fixture-hook-fired" "post-checkout hook still silent after the whole lifecycle"
+assert_no_file "$WORKSHOP/.git/hoist-pic-fired" "post-index-change hook never fired for hoist's index writes"
 hoist cleanup --state "$S"
 assert_status 0 $? "cleanup"
+assert_no_file "$WORKSHOP/.git/hoist-pic-fired" "  …nor for cleanup"
+rm -f "$WORKSHOP/.git/hooks/post-index-change"
 
 # --- (2) a deterministic clean filter: scanned bytes are committed bytes --------
 # The filter upper-cases; a lower-case token becomes detector-grade only in
@@ -43,7 +55,7 @@ hoist prepare --repo "$WORKSHOP" --target main -- token.up .gitattributes
 assert_status 0 $? "prepare with a clean filter configured"
 S="$(state_path)"
 WT="$(state_get "$S" HOIST_WORKTREE)"
-assert_eq "AKIAQ2W3E4R5T6Y7U8I9" "$(git -C "$WT" cat-file blob :0:token.up)" "the index blob is the filtered (upper-case) content"
+assert_eq "AKIA"'Q2W3E4R5T6Y7U8I9' "$(git -C "$WT" cat-file blob :0:token.up)" "the index blob is the filtered (upper-case) content"
 assert_eq "akiaq2w3e4r5t6y7u8i9" "$(cat "$WT/token.up")" "the worktree file is the unfiltered content"
 hoist scan --state "$S" --only secrets
 assert_grep 'token\.up:1 .*aws' "$HOIST_ERR" "the token that exists only after the filter is flagged (index blobs are scanned)"

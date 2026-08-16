@@ -2,7 +2,10 @@
 # t-11-integrity — the bindings the Sol v1 review asked for: frozen manifest,
 # remote endpoints, target/branch in the attestation, acknowledgements in the
 # receipt and the commit message, raw (no textconv) review, ref hooks,
-# unregistered worktrees, secret acknowledgements, long bodies.
+# unregistered worktrees, secret acknowledgements, long bodies; and from the
+# Sol v2 review: every attestation field (a table of single edits), the
+# EFFECTIVE remote endpoints (extra url, insteadOf, pushInsteadOf), and
+# cleanup with an edited branch and no worktree left to prove anything.
 . "$(dirname "$0")/lib.sh"
 
 fixture_new
@@ -203,5 +206,111 @@ hoist finish --state "$S" --title "fix: trim keys" --body "$(printf 'carriage\r\
 assert_status 0 $? "finish with CRLF body"
 assert_eq "0" "$(tr -cd '\r' <"$TMP/message" | wc -c | tr -d ' ')" "CR stripped from the message"
 hoist cleanup --state "$S" --discard >/dev/null 2>&1
+
+# --- (11) every attestation field is verified — a table of single edits --------
+# Each edit is made to a copy of the attestation written by a real full scan;
+# push must refuse with the specific reason and nothing may reach origin.
+ready
+cp "$TMP/attest" "$TMP/attest.orig"
+mutate() { # mutate <sed-expr> <label> <expected-reason>
+	sed "$1" "$TMP/attest.orig" >"$TMP/attest"
+	hoist push --state "$S" --no-pr
+	assert_status 2 $? "push refuses: $2"
+	assert_grep "$3" "$HOIST_ERR" "  …with the reason ($3)"
+	assert_false "  …nothing reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
+}
+append() { # append <line> <label> <expected-reason>
+	{ cat "$TMP/attest.orig"; printf '%s\n' "$1"; } >"$TMP/attest"
+	hoist push --state "$S" --no-pr
+	assert_status 2 $? "push refuses: $2"
+	assert_grep "$3" "$HOIST_ERR" "  …with the reason ($3)"
+	assert_false "  …nothing reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
+}
+mutate 's|^target=.*|target=origin/other|' 'edited target' 'different target'
+mutate 's|^branch=.*|branch=hoist/other|' 'edited branch' 'different branch'
+mutate 's|^base=.*|base=0000000000000000000000000000000000000000|' 'edited base' 'different base'
+mutate 's|^tree=.*|tree=0000000000000000000000000000000000000000|' 'edited tree' 'tree changed'
+mutate 's|^manifest=.*|manifest=0000000000000000000000000000000000000000|' 'edited manifest digest' 'different manifest'
+for c in gates secrets personal drift; do
+	mutate "s|^check.$c=.*|check.$c=bash:skipped|" "check.$c marked skipped" 'not run'
+	mutate "s|^check.$c=.*|check.$c=bash:notrun|" "check.$c marked not run" 'not run'
+done
+mutate 's|^findings=.*|findings=7|' 'edited finding count' 'finding count'
+mutate 's|^findings_digest=.*|findings_digest=0000000000000000000000000000000000000000|' 'edited findings digest' 'findings digest'
+mutate 's|^id=.*|id=other|' 'edited id' 'different hoist'
+mutate 's|^version=.*|version=2|' 'edited version' 'unsupported attestation version'
+mutate '/^branch=/d' 'missing key' 'missing key'
+append 'bogus=1' 'unknown key' 'unknown key'
+append 'tree=deadbeef' 'duplicate key' 'repeats key'
+append 'no-equals-sign' 'malformed line' 'malformed line'
+append '' 'empty line' 'empty line'
+cp "$TMP/attest.orig" "$TMP/attest"
+hoist push --state "$S" --no-pr
+assert_status 0 $? "the untouched attestation still pushes"
+hoist cleanup --state "$S" >/dev/null 2>&1
+
+# --- (12) the EFFECTIVE remote endpoints are bound, not just the stored values --
+# git pushes to every remote.<name>.url when there is no pushurl, and
+# url.<base>.insteadOf / pushInsteadOf rewrite the destination without touching
+# either stored value; all three must be caught after finish.
+ready
+git -C "$WORKSHOP" config --add remote.origin.url /nowhere/second.git
+hoist push --state "$S" --no-pr
+assert_status 2 $? "push refuses when a second remote.origin.url appeared (git would push to both)"
+assert_grep 'changed since prepare' "$HOIST_ERR" "  …with the reason"
+assert_false "  …nothing reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
+git -C "$WORKSHOP" config --unset remote.origin.url '/nowhere/second\.git'
+git -C "$WORKSHOP" config url./nowhere/rewritten.git.insteadOf "$ORIGIN"
+hoist push --state "$S" --no-pr
+assert_status 2 $? "push refuses when an insteadOf rewrite redirects the remote (stored URL unchanged)"
+assert_grep 'effective fetch URL' "$HOIST_ERR" "  …naming the effective endpoint"
+assert_false "  …nothing reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
+git -C "$WORKSHOP" config --unset url./nowhere/rewritten.git.insteadOf
+git -C "$WORKSHOP" config url./nowhere/rewritten.git.pushInsteadOf "$ORIGIN"
+hoist push --state "$S" --no-pr
+assert_status 2 $? "push refuses when a pushInsteadOf rewrite redirects the push"
+assert_grep 'effective push URL' "$HOIST_ERR" "  …naming the effective push endpoint"
+assert_false "  …nothing reached origin" origin_branch_exists "$ORIGIN" "$BRANCH"
+git -C "$WORKSHOP" config --unset url./nowhere/rewritten.git.pushInsteadOf
+hoist push --state "$S" --no-pr
+assert_status 0 $? "push succeeds once the effective endpoints are back to what was bound"
+hoist cleanup --state "$S" >/dev/null 2>&1
+git -C "$WORKSHOP" config --add remote.origin.url /nowhere/second.git
+# shellcheck disable=SC2086
+hoist prepare --repo "$WORKSHOP" --target main -- $FILES
+assert_status 2 $? "prepare refuses a remote with two URLs"
+assert_grep 'exactly one destination' "$HOIST_ERR" "  …with the reason"
+git -C "$WORKSHOP" config --unset remote.origin.url '/nowhere/second\.git'
+
+# --- (13) edited HOIST_BRANCH + a vanished, pruned worktree: branch still kept --
+# (9) proved the live-worktree case; here the proof source is gone entirely.
+git -C "$WORKSHOP" branch victim2
+# shellcheck disable=SC2086
+hoist prepare --repo "$WORKSHOP" --target main -- $FILES
+S="$(state_path)"
+WT="$(state_get "$S" HOIST_WORKTREE)"
+REAL_BRANCH="$(state_get "$S" HOIST_BRANCH)"
+sed "s|^HOIST_BRANCH=.*|HOIST_BRANCH=victim2|" "$S" >"$S.new" && mv "$S.new" "$S"
+rm -r "$WT"
+git -C "$WORKSHOP" worktree prune
+hoist cleanup --state "$S" --discard
+assert_status 0 $? "cleanup completes with no worktree left to prove anything"
+assert_true "the unrelated branch survives" git -C "$WORKSHOP" show-ref --verify -q refs/heads/victim2
+assert_grep 'kept' "$HOIST_ERR" "  …and says the branch was kept"
+git -C "$WORKSHOP" branch -D victim2 >/dev/null
+git -C "$WORKSHOP" branch -D "$REAL_BRANCH" >/dev/null 2>&1 || true
+
+# --- (14) a state written before the effective-endpoint keys existed -----------
+# It is refused for anything that could push, with the reason, and cleanup can
+# still remove it.
+# shellcheck disable=SC2086
+hoist prepare --repo "$WORKSHOP" --target main -- $FILES
+S="$(state_path)"
+grep -v -e '^HOIST_FETCH_EFFECTIVE=' -e '^HOIST_PUSH_EFFECTIVE=' "$S" >"$S.new" && mv "$S.new" "$S"
+hoist scan --state "$S" --gates true
+assert_status 2 $? "scan refuses a state without the effective endpoints"
+assert_grep 'no effective remote endpoints' "$HOIST_ERR" "  …with the reason"
+hoist cleanup --state "$S" --discard
+assert_status 0 $? "cleanup --discard still removes it"
 
 done_testing
