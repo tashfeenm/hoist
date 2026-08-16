@@ -198,7 +198,12 @@ substitutions, disclosed in its header) — prepare, gates-first scan, the raw d
 by hunk, the dry run, the stop, the human's yes in a later turn, the push, CI on
 both operating systems, the merge and the cleanup — including what the tooling
 refused along the way and the caveats about how faithfully it exercised the
-skill.
+skill. [`docs/eval-2-foreign-repo.md`](docs/eval-2-foreign-repo.md) is the
+second run: hoist opening *another* repository's first pull request the next
+day, under a delegated instruction, with the STOP holding for hours until a
+real yes arrived — and what that run showed about hoist (unset `origin/HEAD`,
+no gate autodetection for Python, pre-existing red tests on the target, version
+skew between the dry run and the push).
 
 ## Honest edge cases
 
